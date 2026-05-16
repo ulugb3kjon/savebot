@@ -389,24 +389,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, action, search_key, idx_str = parts
         index = int(idx_str)
 
-        entries = SEARCH_STORE.get(search_key)
-        if not entries or index >= len(entries):
+        store = SEARCH_STORE.get(search_key)
+        if not store:
+            await query.message.reply_text("❌ Ma'lumot eskirgan. Qaytadan yuboring.")
+            return
+        entries = store["entries"] if isinstance(store, dict) else store
+        song_query = store.get("query", "") if isinstance(store, dict) else ""
+
+        if index >= len(entries):
             await query.message.reply_text("❌ Ma'lumot eskirgan. Qaytadan yuboring.")
             return
 
         entry = entries[index]
-        url = entry["url"]
-        if not url.startswith("http"):
-            url = f"https://www.youtube.com/watch?v={url}"
-
+        # SoundCloud: cloud IP'lardan ishlaydi, YouTube bot detection yo'q
+        sc_url = f"scsearch1:{song_query or entry['title']}"
         url_key = uuid.uuid4().hex[:10]
-        URL_STORE[url_key] = url
+        URL_STORE[url_key] = sc_url
 
         status = await query.message.reply_text("⏬ Yuklanmoqda... iltimos kuting")
         await download_and_send(
-            update, context, url,
+            update, context, sc_url,
             quality="audio",
-            platform="youtube",
+            platform="soundcloud",
             url_key=url_key,
             status_msg=status,
             reply_to=query.message,
@@ -559,20 +563,21 @@ async def shazam_and_reply(update: Update, file_id: str, status_msg):
                 return
 
             search_key = uuid.uuid4().hex[:10]
-            SEARCH_STORE[search_key] = []
+            entries_list = []
             for e in entries:
                 vid_id = e.get("id") or e.get("url", "")
                 full_url = e.get("webpage_url") or (
                     f"https://www.youtube.com/watch?v={vid_id}" if vid_id else ""
                 )
-                SEARCH_STORE[search_key].append({
+                entries_list.append({
                     "url": full_url,
                     "title": e.get("title", "Noma'lum"),
                     "duration": e.get("duration"),
                 })
+            SEARCH_STORE[search_key] = {"entries": entries_list, "query": query}
 
             lines = []
-            for i, e in enumerate(SEARCH_STORE[search_key], 1):
+            for i, e in enumerate(entries_list, 1):
                 dur = fmt_duration(e.get("duration"))
                 t = e["title"][:55]
                 lines.append(f"*{i}.* {t}  *{dur}*" if dur else f"*{i}.* {t}")
@@ -583,7 +588,7 @@ async def shazam_and_reply(update: Update, file_id: str, status_msg):
                 + "\n".join(lines)
             )
 
-            n = len(SEARCH_STORE[search_key])
+            n = len(entries_list)
             keyboard = [
                 [
                     InlineKeyboardButton(str(i + 1), callback_data=f"yt:audio:{search_key}:{i}")
