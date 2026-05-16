@@ -114,6 +114,7 @@ def _sync_search(query: str, limit: int = 5) -> list:
         "no_warnings": True,
         "extract_flat": True,
         "playlist_items": f"1:{limit}",
+        "extractor_args": {"youtube": {"player_client": ["ios", "android", "web_embedded"]}},
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
@@ -128,6 +129,8 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
         "noplaylist": True,
     }
 
+    youtube_args = {"extractor_args": {"youtube": {"player_client": ["ios", "android", "web_embedded"]}}}
+
     if quality == "audio":
         base["format"] = "bestaudio/best"
         base["postprocessors"] = [
@@ -137,6 +140,8 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
                 "preferredquality": "192",
             }
         ]
+        if platform == "youtube":
+            base.update(youtube_args)
         return base
 
     if platform == "youtube":
@@ -148,6 +153,7 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
             f"/best[height<={height}]/best"
         )
         base["merge_output_format"] = "mp4"
+        base.update(youtube_args)
         return base
 
     base["format"] = "best[ext=mp4]/best[ext=webm]/best"
