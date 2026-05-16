@@ -163,6 +163,70 @@ async def resolve_pinterest_short_url(url: str) -> str:
     return await loop.run_in_executor(None, _sync_resolve_pin_url, url)
 
 
+async def _cobalt_download(url: str, quality: str, tmpdir: str) -> str | None:
+    """cobalt.tools API orqali YouTube yuklab olish (Railway IP blokirovkasini chetlab o'tish)."""
+    from aiohttp import ClientSession, ClientTimeout
+
+    is_audio = quality == "audio"
+    vq = {"360": "360", "720": "720", "1080": "1080"}.get(quality, "720")
+    ext = ".mp3" if is_audio else ".mp4"
+    filepath = os.path.join(tmpdir, f"cobalt{ext}")
+
+    payload = {
+        "url": url,
+        "downloadMode": "audio" if is_audio else "auto",
+        "audioFormat": "mp3",
+        "audioBitrate": "192",
+        "videoQuality": vq,
+    }
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with ClientSession() as session:
+            async with session.post(
+                "https://api.cobalt.tools/",
+                json=payload,
+                headers=headers,
+                timeout=ClientTimeout(total=30),
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning("cobalt API %d qaytardi", resp.status)
+                    return None
+                data = await resp.json()
+
+            status_c = data.get("status")
+            dl_url = data.get("url")
+            if status_c not in ("redirect", "tunnel") or not dl_url:
+                logger.warning("cobalt: status=%s data=%s", status_c, str(data)[:150])
+                return None
+
+            async with session.get(dl_url, timeout=ClientTimeout(total=300)) as dl_resp:
+                if dl_resp.status != 200:
+                    logger.warning("cobalt yuklab olish %d", dl_resp.status)
+                    return None
+                with open(filepath, "wb") as f:
+                    async for chunk in dl_resp.content.iter_chunked(65536):
+                        f.write(chunk)
+
+        if os.path.exists(filepath) and os.path.getsize(filepath) > 1000:
+            logger.info("cobalt OK: %d bayt", os.path.getsize(filepath))
+            return filepath
+        if os.path.exists(filepath):
+            os.unlink(filepath)
+        return None
+    except Exception as exc:
+        logger.warning("cobalt xatosi: %s", str(exc)[:120])
+        if os.path.exists(filepath):
+            try:
+                os.unlink(filepath)
+            except OSError:
+                pass
+        return None
+
+
 def _sync_search(query: str, limit: int = 5) -> list:
     # Request 2x to compensate for any filtered-out entries
     fetch = limit * 2
@@ -384,6 +448,7 @@ async def download_shazam_audio(query: str, yt_url: str, status_msg, reply_targe
 
     with tempfile.TemporaryDirectory() as tmpdir:
         info = None
+        cobalt_path = None
 
         # 1) SoundCloud
         sc_opts = _base_opts(tmpdir)
@@ -395,8 +460,16 @@ async def download_shazam_audio(query: str, yt_url: str, status_msg, reply_targe
         except Exception as e:
             logger.warning("SoundCloud topilmadi: %s", str(e)[:120])
 
-        # 2) YouTube fallback (android_embedded → web_embedded → ios → tv)
+        # 2) cobalt.tools (YouTube URL orqali, IP blokirovkasiz)
         if not info:
+            cobalt_url = yt_url if yt_url.startswith("http") else None
+            if cobalt_url:
+                cobalt_path = await _cobalt_download(cobalt_url, "audio", tmpdir)
+                if cobalt_path:
+                    logger.info("cobalt audio: topildi — %s", cobalt_url)
+
+        # 3) yt-dlp YouTube fallback
+        if not info and not cobalt_path:
             yt_opts = _base_opts(tmpdir)
             yt_opts["format"] = "140/bestaudio/best"
             yt_opts["extractor_args"] = {
@@ -409,25 +482,28 @@ async def download_shazam_audio(query: str, yt_url: str, status_msg, reply_targe
                 info = await loop.run_in_executor(
                     None, lambda: _sync_download(yt_opts, dl_url)
                 )
-                logger.info("YouTube fallback: topildi — %s", dl_url)
+                logger.info("YouTube yt-dlp: topildi — %s", dl_url)
             except Exception as e:
-                logger.warning("YouTube fallback ham xato: %s", str(e)[:120])
+                logger.warning("YouTube yt-dlp ham xato: %s", str(e)[:120])
 
-        if not info:
+        if not info and not cobalt_path:
             await status_msg.edit_text(
                 "❌ Bu qo'shiq yuklab bo'lmadi.\n"
-                "SoundCloud va YouTube ikkalasida ham topilmadi.\n"
                 "Boshqa variant tanlang yoki qo'shiq nomini to'g'ridan-to'g'ri yuboring."
             )
             return
 
-        title = (info.get("title") or "audio")[:100]
-        files = [f for f in Path(tmpdir).iterdir() if f.is_file()]
-        if not files:
-            await status_msg.edit_text("❌ Fayl topilmadi.")
-            return
+        if cobalt_path:
+            filepath = Path(cobalt_path)
+            title = query[:100]
+        else:
+            title = (info.get("title") or "audio")[:100]
+            files = [f for f in Path(tmpdir).iterdir() if f.is_file()]
+            if not files:
+                await status_msg.edit_text("❌ Fayl topilmadi.")
+                return
+            filepath = files[0]
 
-        filepath = files[0]
         if filepath.stat().st_size > MAX_FILE_SIZE:
             mb = filepath.stat().st_size // (1024 * 1024)
             await status_msg.edit_text(f"❌ Fayl {mb} MB — Telegram limiti 50 MB.")
@@ -514,6 +590,42 @@ async def download_and_send(
         reply_target = reply_to or update.message
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        # YouTube uchun cobalt.tools bilan sinab ko'ramiz (Railway IP blokirovkasini chetlab)
+        if platform == "youtube":
+            cobalt_path = await _cobalt_download(url, quality, tmpdir)
+            if cobalt_path:
+                size = os.path.getsize(cobalt_path)
+                if size > MAX_FILE_SIZE:
+                    mb = size // (1024 * 1024)
+                    await status.edit_text(
+                        f"❌ Fayl hajmi {mb} MB — Telegram limiti 50 MB.\n"
+                        "Iltimos, past sifat tanlang."
+                    )
+                    return
+                await status.edit_text("📤 Yuborilmoqda...")
+                is_audio_c = quality == "audio"
+                with open(cobalt_path, "rb") as fh:
+                    if is_audio_c:
+                        await reply_target.reply_audio(fh, title="YouTube Audio", write_timeout=120)
+                    else:
+                        audio_markup = None
+                        if url_key:
+                            audio_markup = InlineKeyboardMarkup([[
+                                InlineKeyboardButton(
+                                    "🎵 Qo'shiqni ham yuklash (MP3)",
+                                    callback_data=f"dl:audio:{url_key}"
+                                )
+                            ]])
+                        await reply_target.reply_video(
+                            fh,
+                            caption="🎬 YouTube",
+                            supports_streaming=True,
+                            reply_markup=audio_markup,
+                            write_timeout=120,
+                        )
+                await status.delete()
+                return
+
         ydl_opts = build_ydl_opts(tmpdir, quality, platform)
 
         try:
