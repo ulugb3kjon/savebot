@@ -322,26 +322,22 @@ async def download_and_send(
                 if is_audio:
                     await reply_target.reply_audio(fh, title=title)
                 else:
+                    audio_markup = None
+                    if url_key:
+                        audio_markup = InlineKeyboardMarkup([[
+                            InlineKeyboardButton(
+                                "🎵 Qo'shiqni ham yuklash (MP3)",
+                                callback_data=f"dl:audio:{url_key}"
+                            )
+                        ]])
                     await reply_target.reply_video(
                         fh,
                         caption=f"🎬 {title}",
                         supports_streaming=True,
+                        reply_markup=audio_markup,
                     )
 
             await status.delete()
-
-            # Video yuklanganida — qo'shiqni ham yuklash tugmasini ko'rsatamiz
-            if not is_audio and url_key:
-                audio_keyboard = [[
-                    InlineKeyboardButton(
-                        "🎵 Qo'shiqni ham yuklash (MP3)",
-                        callback_data=f"dl:audio:{url_key}"
-                    )
-                ]]
-                await reply_target.reply_text(
-                    "👆 Bu videodagi qo'shiqni alohida yuklamoqchimisiz?",
-                    reply_markup=InlineKeyboardMarkup(audio_keyboard),
-                )
 
         except yt_dlp.utils.DownloadError as e:
             err = str(e).lower()

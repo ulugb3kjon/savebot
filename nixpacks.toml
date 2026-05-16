@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["python312", "python312Packages.pip"]
+nixPkgs = ["python312", "python312Packages.pip", "ffmpeg"]
 cmds = ["python3 -m venv /opt/venv"]
 
 [phases.install]
