@@ -202,7 +202,7 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
         ]
         if platform == "youtube":
             base["extractor_args"] = {
-                "youtube": {"player_client": ["ios", "tv_embedded", "web_creator"]}
+                "youtube": {"player_client": ["android_embedded", "web_embedded", "ios", "tv"]}
             }
         return base
 
@@ -216,7 +216,7 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
         )
         base["merge_output_format"] = "mp4"
         base["extractor_args"] = {
-            "youtube": {"player_client": ["ios", "tv_embedded", "web_creator"]}
+            "youtube": {"player_client": ["android_embedded", "web_embedded", "ios", "tv"]}
         }
         return base
 
@@ -395,12 +395,15 @@ async def download_shazam_audio(query: str, yt_url: str, status_msg, reply_targe
         except Exception as e:
             logger.warning("SoundCloud topilmadi: %s", str(e)[:120])
 
-        # 2) YouTube fallback (tv client, audio-only format 140)
+        # 2) YouTube fallback (android_embedded → web_embedded → ios → tv)
         if not info:
             yt_opts = _base_opts(tmpdir)
             yt_opts["format"] = "140/bestaudio/best"
             yt_opts["extractor_args"] = {
-                "youtube": {"player_client": ["tv", "ios"], "player_skip": ["webpage"]}
+                "youtube": {
+                    "player_client": ["android_embedded", "web_embedded", "ios", "tv"],
+                    "player_skip": ["webpage"],
+                }
             }
             dl_url = yt_url if yt_url.startswith("http") else f"ytsearch1:{query}"
             try:
@@ -573,10 +576,22 @@ async def download_and_send(
         except yt_dlp.utils.DownloadError as e:
             err = str(e).lower()
             logger.warning("yt-dlp [%s]: %s", platform, err[:200])
-            if "private" in err or "login" in err:
+            if "sign in" in err or "bot" in err or "confirm" in err:
+                await status.edit_text(
+                    "⚠️ *YouTube bu serverdan yuklab bo'lmaydi*\n\n"
+                    "YouTube serverimiz IP'ini bloklagan.\n\n"
+                    "✅ *Ishlaydiganlar:*\n"
+                    "• Instagram, TikTok, Pinterest\n"
+                    "• Ovozli xabar → Shazam → qo'shiq\n\n"
+                    "❌ *YouTube video* — hozircha ishlamaydi",
+                    parse_mode="Markdown"
+                )
+            elif "private" in err or "login" in err:
                 await status.edit_text("❌ Bu xususiy post yoki login talab qiladi.")
             elif "not available" in err or "unavailable" in err:
                 await status.edit_text("❌ Video mavjud emas yoki cheklov qo'yilgan.")
+            elif "404" in err or "not found" in err:
+                await status.edit_text("❌ Kontent topilmadi (404).")
             else:
                 await status.edit_text(f"❌ Yuklashda xatolik:\n`{str(e)[:200]}`", parse_mode="Markdown")
         except Exception as e:
