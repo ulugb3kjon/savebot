@@ -128,28 +128,39 @@ def _sync_download(ydl_opts: dict, url: str):
         return ydl.extract_info(url, download=True)
 
 
-async def resolve_pinterest_short_url(url: str) -> str:
-    """pin.it → clean https://www.pinterest.com/pin/ID/ URL ga aylantiradi."""
-    from aiohttp import ClientSession, ClientTimeout
+def _sync_resolve_pin_url(url: str) -> str:
+    """pin.it → pinterest.com/pin/ID/ URL. httpx + aiohttp fallback."""
+    import httpx
+
+    _headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    # httpx bilan sinab ko'r (urllib3 stack, aiohttp'dan farq qiladi)
     try:
-        async with ClientSession() as session:
-            async with session.head(
-                url, allow_redirects=True,
-                timeout=ClientTimeout(total=10),
-                headers={"User-Agent": "Mozilla/5.0"},
-            ) as resp:
-                final = str(resp.url)
-        # Numeric pin ID ni ajratib, toza URL yasaymiz
-        m = re.search(r'/pin/(\d+)', final)
-        if m:
-            clean = f"https://www.pinterest.com/pin/{m.group(1)}/"
-            logger.info("Pinterest URL: %s → %s", url, clean)
-            return clean
-        logger.info("pin.it resolved: %s → %s", url, final)
-        return final
+        with httpx.Client(follow_redirects=True, timeout=30, headers=_headers) as client:
+            resp = client.get(url)
+            final = str(resp.url)
+            m = re.search(r"/pin/(\d+)", final)
+            if m:
+                return f"https://www.pinterest.com/pin/{m.group(1)}/"
+            if "pinterest.com" in final:
+                return final
     except Exception as e:
-        logger.warning("pin.it resolve xatosi: %s", e)
-        return url
+        logger.warning("httpx pin.it resolve xatosi: %s", e)
+
+    return url  # resolve muvaffaqiyatsiz — original qaytaramiz
+
+
+async def resolve_pinterest_short_url(url: str) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _sync_resolve_pin_url, url)
 
 
 def _sync_search(query: str, limit: int = 5) -> list:
