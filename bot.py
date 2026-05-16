@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 YOUTUBE_COOKIES = os.environ.get("YOUTUBE_COOKIES", "")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+PORT = int(os.environ.get("PORT", "8080"))
 
 COOKIES_FILE = "/tmp/yt_cookies.txt"
 if YOUTUBE_COOKIES:
@@ -415,30 +417,27 @@ async def download_and_send(
 
 # ─── Shazam + YouTube search ──────────────────────────────────────────────────
 
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    voice = update.message.voice or update.message.audio
-    if not voice:
-        return
-
-    status = await update.message.reply_text("🎵 Musiqa aniqlanmoqda... iltimos kuting")
+async def shazam_and_reply(update: Update, file_id: str, status_msg):
+    """Faylni yuklab, Shazam bilan aniqlaydi va natijani yuboradi."""
+    msg = update.message
+    loop = asyncio.get_event_loop()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        oga_path = os.path.join(tmpdir, "voice.oga")
-        wav_path = os.path.join(tmpdir, "voice.wav")
+        src_path = os.path.join(tmpdir, "media.bin")
+        wav_path = os.path.join(tmpdir, "audio.wav")
 
         try:
-            tg_file = await context.bot.get_file(voice.file_id)
-            await tg_file.download_to_drive(oga_path)
+            tg_file = await update.get_bot().get_file(file_id)
+            await tg_file.download_to_drive(src_path)
 
-            loop = asyncio.get_event_loop()
-            converted = await loop.run_in_executor(None, convert_to_wav, oga_path, wav_path)
-            recognize_path = wav_path if converted else oga_path
+            converted = await loop.run_in_executor(None, convert_to_wav, src_path, wav_path)
+            recognize_path = wav_path if converted else src_path
 
             shazam = Shazam()
             result = await shazam.recognize(recognize_path)
 
             if not result or not result.get("matches"):
-                await status.edit_text(
+                await status_msg.edit_text(
                     "❓ Qo'shiq aniqlanmadi.\n\n"
                     "• Kamida 5-10 soniya yuboring\n"
                     "• Shovqinsiz joyda yozing\n"
@@ -459,13 +458,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             coverart = images.get("coverarthq") or images.get("coverart")
 
             if not entries:
-                # YouTube natija yo'q — faqat Shazam natijasini ko'rsat
                 text = f"Ijrochi: *{artist}*\nQo'shiq nomi: *{song_title}*"
-                await status.delete()
+                await status_msg.delete()
                 if coverart:
-                    await update.message.reply_photo(coverart, caption=text, parse_mode="Markdown")
+                    await msg.reply_photo(coverart, caption=text, parse_mode="Markdown")
                 else:
-                    await update.message.reply_text(text, parse_mode="Markdown")
+                    await msg.reply_text(text, parse_mode="Markdown")
                 return
 
             # Natijalarni saqlash
@@ -504,17 +502,17 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ],
             ]
 
-            await status.delete()
+            await status_msg.delete()
 
             if coverart:
-                await update.message.reply_photo(
+                await msg.reply_photo(
                     coverart,
                     caption=caption,
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="Markdown",
                 )
             else:
-                await update.message.reply_text(
+                await msg.reply_text(
                     caption,
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="Markdown",
@@ -522,7 +520,23 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         except Exception as e:
             logger.exception("Shazam/search xatosi")
-            await status.edit_text(f"❌ Xatolik:\n`{str(e)[:200]}`", parse_mode="Markdown")
+            await status_msg.edit_text(f"❌ Xatolik:\n`{str(e)[:200]}`", parse_mode="Markdown")
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    voice = update.message.voice or update.message.audio
+    if not voice:
+        return
+    status = await update.message.reply_text("🎵 Musiqa aniqlanmoqda... iltimos kuting")
+    await shazam_and_reply(update, voice.file_id, status)
+
+
+async def handle_video_shazam(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    video = update.message.video or update.message.video_note
+    if not video:
+        return
+    status = await update.message.reply_text("🎵 Videodagi musiqa aniqlanmoqda...")
+    await shazam_and_reply(update, video.file_id, status)
 
 
 # ─── main ────────────────────────────────────────────────────────────────────
@@ -546,11 +560,23 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.AUDIO, handle_voice))
+    app.add_handler(MessageHandler(filters.VIDEO, handle_video_shazam))
+    app.add_handler(MessageHandler(filters.VIDEO_NOTE, handle_video_shazam))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_error_handler(conflict_error_handler)
 
-    logger.info("Bot ishga tushdi (polling mode)...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    if WEBHOOK_URL:
+        logger.info("Bot webhook rejimida ishga tushdi: %s", WEBHOOK_URL)
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            webhook_url=f"{WEBHOOK_URL}/webhook",
+            url_path="/webhook",
+            drop_pending_updates=True,
+        )
+    else:
+        logger.info("Bot polling rejimida ishga tushdi...")
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
