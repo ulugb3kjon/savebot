@@ -596,8 +596,10 @@ async def handle_video_shazam(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def conflict_error_handler(update, context):
     if isinstance(context.error, Conflict):
-        logger.warning("Conflict: boshqa instance ishlayapti, bu instance to'xtatilmoqda.")
-        os._exit(0)
+        # Yangi container: sabr qil, eski container Railway SIGTERM orqali o'ladi
+        # os._exit qilsak YANGI container o'ladi va deploy hech qachon bo'lmaydi
+        logger.warning("Conflict: eski instance hali ishlayapti. 30s kutilmoqda...")
+        await asyncio.sleep(30)
     else:
         logger.error("Xato: %s", context.error)
 
