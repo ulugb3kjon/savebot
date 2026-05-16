@@ -11,6 +11,7 @@ import av
 import yt_dlp
 from shazamio import Shazam
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import Conflict
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -513,6 +514,14 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── main ────────────────────────────────────────────────────────────────────
 
+async def conflict_error_handler(update, context):
+    if isinstance(context.error, Conflict):
+        logger.warning("Conflict xatosi: boshqa instance ishlayapti. 30s kutilmoqda...")
+        await asyncio.sleep(30)
+    else:
+        logger.error("Xato: %s", context.error)
+
+
 def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN muhit o'zgaruvchisi o'rnatilmagan!")
@@ -525,9 +534,10 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.AUDIO, handle_voice))
     app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_error_handler(conflict_error_handler)
 
     logger.info("Bot ishga tushdi (polling mode)...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
