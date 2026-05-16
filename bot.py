@@ -128,6 +128,25 @@ def _sync_download(ydl_opts: dict, url: str):
         return ydl.extract_info(url, download=True)
 
 
+async def resolve_short_url(url: str) -> str:
+    """pin.it kabi qisqa URLlarni to'liq URLga aylantiradi."""
+    from aiohttp import ClientSession, ClientTimeout
+    try:
+        async with ClientSession() as session:
+            async with session.head(
+                url, allow_redirects=True,
+                timeout=ClientTimeout(total=10),
+                headers={"User-Agent": "Mozilla/5.0"},
+            ) as resp:
+                final = str(resp.url)
+                if final != url:
+                    logger.info("URL kengaytirildi: %s → %s", url, final)
+                return final
+    except Exception as e:
+        logger.warning("URL kengaytirish xatosi: %s", e)
+        return url
+
+
 def _sync_search(query: str, limit: int = 5) -> list:
     # Request 2x to compensate for any filtered-out entries
     fetch = limit * 2
@@ -166,7 +185,7 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
             }
         ]
         if platform == "youtube":
-            base["extractor_args"] = {"youtube": {"player_client": ["web"]}}
+            base["extractor_args"] = {"youtube": {"player_client": ["web", "android", "ios"]}}
         return base
 
     if platform == "youtube":
@@ -178,7 +197,7 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
             f"/best[height<={height}]/best"
         )
         base["merge_output_format"] = "mp4"
-        base["extractor_args"] = {"youtube": {"player_client": ["web"]}}
+        base["extractor_args"] = {"youtube": {"player_client": ["web", "android", "ios"]}}
         return base
 
     if platform == "instagram":
@@ -267,6 +286,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     url = matches[0]
+
+    # pin.it → to'liq pinterest.com URL ga aylantir (yt-dlp pin.it taniy olmaydi)
+    if "pin.it" in url:
+        url = await resolve_short_url(url)
+
     platform = detect_platform(url)
 
     url_key = uuid.uuid4().hex[:10]
