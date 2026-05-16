@@ -202,7 +202,7 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
         ]
         if platform == "youtube":
             base["extractor_args"] = {
-                "youtube": {"player_client": ["android_embedded", "web_embedded", "ios", "tv"]}
+                "youtube": {"player_client": ["web", "android", "android_embedded", "ios", "tv"]}
             }
         return base
 
@@ -216,7 +216,7 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
         )
         base["merge_output_format"] = "mp4"
         base["extractor_args"] = {
-            "youtube": {"player_client": ["android_embedded", "web_embedded", "ios", "tv"]}
+            "youtube": {"player_client": ["web", "android", "android_embedded", "ios", "tv"]}
         }
         return base
 
@@ -401,8 +401,7 @@ async def download_shazam_audio(query: str, yt_url: str, status_msg, reply_targe
             yt_opts["format"] = "140/bestaudio/best"
             yt_opts["extractor_args"] = {
                 "youtube": {
-                    "player_client": ["android_embedded", "web_embedded", "ios", "tv"],
-                    "player_skip": ["webpage"],
+                    "player_client": ["web", "android", "android_embedded", "ios", "tv"],
                 }
             }
             dl_url = yt_url if yt_url.startswith("http") else f"ytsearch1:{query}"
@@ -576,16 +575,32 @@ async def download_and_send(
         except yt_dlp.utils.DownloadError as e:
             err = str(e).lower()
             logger.warning("yt-dlp [%s]: %s", platform, err[:200])
-            if "sign in" in err or "bot" in err or "confirm" in err:
-                await status.edit_text(
-                    "⚠️ *YouTube bu serverdan yuklab bo'lmaydi*\n\n"
-                    "YouTube serverimiz IP'ini bloklagan.\n\n"
-                    "✅ *Ishlaydiganlar:*\n"
-                    "• Instagram, TikTok, Pinterest\n"
-                    "• Ovozli xabar → Shazam → qo'shiq\n\n"
-                    "❌ *YouTube video* — hozircha ishlamaydi",
-                    parse_mode="Markdown"
-                )
+            if "sign in" in err or "bot" in err or "confirm" in err or (platform == "youtube" and ("unavailable" in err or "not available" in err)):
+                await status.edit_text("⏳ YouTube yuklash bajarilmoqda, iltimos kuting...")
+                # Retry with web client + cookies explicitly
+                try:
+                    retry_opts = build_ydl_opts(tmpdir, quality, platform)
+                    retry_opts["extractor_args"] = {"youtube": {"player_client": ["web"]}}
+                    loop2 = asyncio.get_event_loop()
+                    info2 = await loop2.run_in_executor(None, lambda: _sync_download(retry_opts, url))
+                    if info2:
+                        files2 = [f for f in Path(tmpdir).iterdir() if f.is_file()]
+                        if files2:
+                            fp2 = files2[0]
+                            if fp2.stat().st_size <= MAX_FILE_SIZE:
+                                title2 = (info2.get("title") or "media")[:100]
+                                ext2 = fp2.suffix.lower()
+                                is_audio2 = quality == "audio" or ext2 in (".mp3", ".m4a")
+                                with open(fp2, "rb") as fh2:
+                                    if is_audio2:
+                                        await reply_target.reply_audio(fh2, title=title2, write_timeout=120)
+                                    else:
+                                        await reply_target.reply_video(fh2, caption=f"🎬 {title2}", supports_streaming=True, write_timeout=120)
+                                await status.delete()
+                                return
+                except Exception:
+                    pass
+                await status.edit_text("❌ YouTube bu videoni yuklab bo'lmadi.\nInstagram, TikTok, Pinterest ishlaydi.")
             elif "private" in err or "login" in err:
                 await status.edit_text("❌ Bu xususiy post yoki login talab qiladi.")
             elif "not available" in err or "unavailable" in err:
