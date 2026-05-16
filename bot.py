@@ -201,7 +201,9 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
             }
         ]
         if platform == "youtube":
-            base["extractor_args"] = {"youtube": {"player_client": ["web", "android", "ios"]}}
+            base["extractor_args"] = {
+                "youtube": {"player_client": ["ios", "tv_embedded", "web_creator"]}
+            }
         return base
 
     if platform == "youtube":
@@ -213,7 +215,9 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
             f"/best[height<={height}]/best"
         )
         base["merge_output_format"] = "mp4"
-        base["extractor_args"] = {"youtube": {"player_client": ["web", "android", "ios"]}}
+        base["extractor_args"] = {
+            "youtube": {"player_client": ["ios", "tv_embedded", "web_creator"]}
+        }
         return base
 
     if platform == "instagram":
