@@ -635,31 +635,27 @@ async def handle_video_shazam(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ─── main ────────────────────────────────────────────────────────────────────
 
-async def conflict_error_handler(update, context):
-    if isinstance(context.error, Conflict):
-        # Yangi container: sabr qil, eski container Railway SIGTERM orqali o'ladi
-        # os._exit qilsak YANGI container o'ladi va deploy hech qachon bo'lmaydi
-        logger.warning("Conflict: eski instance hali ishlayapti. 30s kutilmoqda...")
-        await asyncio.sleep(30)
-    else:
-        logger.error("Xato: %s", context.error)
+async def error_handler(update, context):
+    logger.error("Xato: %s", context.error)
 
 
 async def async_main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN muhit o'zgaruvchisi o'rnatilmagan!")
 
-    health_runner = await start_health_server(PORT)
+    RAILWAY_DOMAIN = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
 
-    app = (
+    builder = (
         Application.builder()
         .token(BOT_TOKEN)
         .read_timeout(30)
         .write_timeout(120)
         .connect_timeout(30)
         .pool_timeout(10)
-        .build()
     )
+    if RAILWAY_DOMAIN:
+        builder = builder.updater(None)
+    app = builder.build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
@@ -669,20 +665,59 @@ async def async_main():
     app.add_handler(MessageHandler(filters.VIDEO, handle_video_shazam))
     app.add_handler(MessageHandler(filters.VIDEO_NOTE, handle_video_shazam))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_error_handler(conflict_error_handler)
+    app.add_error_handler(error_handler)
 
-    async with app:
-        await app.start()
-        await app.updater.start_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
-        )
-        logger.info("Bot ishga tushdi (polling mode)...")
-        await asyncio.Event().wait()  # SIGTERM → os._exit(0) kills this
-        await app.updater.stop()
-        await app.stop()
+    if RAILWAY_DOMAIN:
+        # Webhook mode — polling yo'q, 409 Conflict mumkin emas
+        webhook_url = f"https://{RAILWAY_DOMAIN}/{BOT_TOKEN}"
 
-    await health_runner.cleanup()
+        async def webhook_route(request):
+            try:
+                data = await request.json()
+                update = Update.de_json(data, app.bot)
+                await app.update_queue.put(update)
+            except Exception as e:
+                logger.error("Webhook parse xatosi: %s", e)
+            return web.Response(text="OK")
+
+        web_server = web.Application()
+        web_server.router.add_get("/", _health_handler)
+        web_server.router.add_get("/health", _health_handler)
+        web_server.router.add_post(f"/{BOT_TOKEN}", webhook_route)
+
+        runner = web.AppRunner(web_server)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", PORT)
+        await site.start()
+        logger.info("Server port %d da ishga tushdi", PORT)
+
+        async with app:
+            await app.start()
+            await app.bot.set_webhook(
+                url=webhook_url,
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True,
+            )
+            logger.info("Bot webhook mode da ishga tushdi: %s", webhook_url)
+            await asyncio.Event().wait()
+            await app.bot.delete_webhook()
+            await app.stop()
+
+        await runner.cleanup()
+    else:
+        # Polling mode — local ishlab chiqish uchun
+        health_runner = await start_health_server(PORT)
+        async with app:
+            await app.start()
+            await app.updater.start_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True,
+            )
+            logger.info("Bot ishga tushdi (polling mode)...")
+            await asyncio.Event().wait()
+            await app.updater.stop()
+            await app.stop()
+        await health_runner.cleanup()
 
 
 def main():
