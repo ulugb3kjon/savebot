@@ -1,5 +1,5 @@
 python-telegram-bot==21.9
-yt-dlp==2024.12.23
+yt-dlp
 shazamio==0.6.0
 aiohttp==3.11.11
 aiofiles==23.2.1

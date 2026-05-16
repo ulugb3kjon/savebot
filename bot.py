@@ -119,7 +119,17 @@ def _sync_search(query: str, limit: int = 5) -> list:
         "playlist_items": f"1:{limit}",
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(f"scsearch{limit}:{query}", download=False)
+        # SoundCloud urinib ko'ramiz
+        try:
+            info = ydl.extract_info(f"scsearch{limit}:{query}", download=False)
+            entries = [e for e in (info.get("entries", []) if info else []) if e]
+            if entries:
+                return entries
+        except Exception:
+            pass
+        # SoundCloud ishlamasa YouTube (ios client bilan)
+        ydl_opts["extractor_args"] = {"youtube": {"player_client": ["ios", "android"]}}
+        info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
         return info.get("entries", []) if info else []
 
 
@@ -473,9 +483,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             search_key = uuid.uuid4().hex[:10]
             SEARCH_STORE[search_key] = []
             for e in entries:
-                full_url = e.get("url") or e.get("webpage_url") or e.get("id", "")
-                if full_url and not full_url.startswith("http"):
-                    full_url = f"https://soundcloud.com/{full_url}"
+                full_url = e.get("webpage_url") or e.get("url") or ""
+                # YouTube ID bo'lsa to'liq URL yasaymiz
+                if full_url and not full_url.startswith("http") and len(full_url) == 11:
+                    full_url = f"https://www.youtube.com/watch?v={full_url}"
                 SEARCH_STORE[search_key].append({
                     "url": full_url,
                     "title": e.get("title", "Noma'lum"),
