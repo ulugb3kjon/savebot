@@ -28,6 +28,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+YOUTUBE_COOKIES = os.environ.get("YOUTUBE_COOKIES", "")
+
+COOKIES_FILE = "/tmp/yt_cookies.txt"
+if YOUTUBE_COOKIES:
+    with open(COOKIES_FILE, "w") as _f:
+        _f.write(YOUTUBE_COOKIES)
+else:
+    COOKIES_FILE = None
 
 URL_REGEX = re.compile(
     r"https?://(?:www\.)?"
@@ -117,18 +125,11 @@ def _sync_search(query: str, limit: int = 5) -> list:
         "no_warnings": True,
         "extract_flat": True,
         "playlist_items": f"1:{limit}",
+        "extractor_args": {"youtube": {"player_client": ["ios", "android"]}},
     }
+    if COOKIES_FILE:
+        ydl_opts["cookiefile"] = COOKIES_FILE
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        # SoundCloud urinib ko'ramiz
-        try:
-            info = ydl.extract_info(f"scsearch{limit}:{query}", download=False)
-            entries = [e for e in (info.get("entries", []) if info else []) if e]
-            if entries:
-                return entries
-        except Exception:
-            pass
-        # SoundCloud ishlamasa YouTube (ios client bilan)
-        ydl_opts["extractor_args"] = {"youtube": {"player_client": ["ios", "android"]}}
         info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
         return info.get("entries", []) if info else []
 
@@ -142,6 +143,8 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
     }
 
     youtube_args = {"extractor_args": {"youtube": {"player_client": ["ios", "android", "web_embedded"]}}}
+    if COOKIES_FILE:
+        youtube_args["cookiefile"] = COOKIES_FILE
 
     if quality == "audio":
         base["format"] = "bestaudio/best"
@@ -483,10 +486,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             search_key = uuid.uuid4().hex[:10]
             SEARCH_STORE[search_key] = []
             for e in entries:
-                full_url = e.get("webpage_url") or e.get("url") or ""
-                # YouTube ID bo'lsa to'liq URL yasaymiz
-                if full_url and not full_url.startswith("http") and len(full_url) == 11:
-                    full_url = f"https://www.youtube.com/watch?v={full_url}"
+                vid_id = e.get("id") or e.get("url", "")
+                full_url = e.get("webpage_url") or (
+                    f"https://www.youtube.com/watch?v={vid_id}" if vid_id else ""
+                )
                 SEARCH_STORE[search_key].append({
                     "url": full_url,
                     "title": e.get("title", "Noma'lum"),
