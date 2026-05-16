@@ -1,8 +1,5 @@
 [phases.setup]
-nixPkgs = ["ffmpeg"]
-
-[phases.install]
-cmds = ["python3 -m pip install -r requirements.txt"]
+aptPkgs = ["ffmpeg"]
 
 [start]
 cmd = "python3 bot.py"
