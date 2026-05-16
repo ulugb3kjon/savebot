@@ -296,30 +296,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url_key = uuid.uuid4().hex[:10]
         URL_STORE[url_key] = url
 
-        if action == "video":
-            keyboard = [
-                [
-                    InlineKeyboardButton("📹 360p", callback_data=f"dl:360:{url_key}"),
-                    InlineKeyboardButton("📹 720p", callback_data=f"dl:720:{url_key}"),
-                    InlineKeyboardButton("📹 1080p", callback_data=f"dl:1080:{url_key}"),
-                ],
-                [InlineKeyboardButton("🎵 Faqat audio (MP3)", callback_data=f"dl:audio:{url_key}")],
-            ]
-            await query.message.reply_text(
-                "🎬 Video sifatini tanlang:",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-        else:
-            # audio — yangi status xabari yuborib, audio yuklaymiz
-            status = await query.message.reply_text("⏬ Audio yuklanmoqda... iltimos kuting")
-            await download_and_send(
-                update, context, url,
-                quality="audio",
-                platform="youtube",
-                url_key=url_key,
-                status_msg=status,
-                reply_to=query.message,
-            )
+        # har doim audio yuklab yuboradi
+        status = await query.message.reply_text("⏬ Yuklanmoqda... iltimos kuting")
+        await download_and_send(
+            update, context, url,
+            quality="audio",
+            platform="youtube",
+            url_key=url_key,
+            status_msg=status,
+            reply_to=query.message,
+        )
         return
 
 
@@ -452,30 +438,35 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             song_title = track.get("title", "Noma'lum")
             artist = track.get("subtitle", "Noma'lum ijrochi")
 
-            # YouTube'dan qidirish
-            await status.edit_text("🔍 YouTube'dan qidirilmoqda...")
+            # YouTube'dan qidirish (jim)
             query = f"{artist} {song_title}"
             entries = await loop.run_in_executor(None, _sync_search, query, 5)
             entries = [e for e in entries if e]
 
+            images = track.get("images", {})
+            coverart = images.get("coverarthq") or images.get("coverart")
+
             if not entries:
-                await status.edit_text(
-                    f"🎵 *Qo'shiq topildi!*\n\n🎤 *Ijrochi:* {artist}\n🎶 *Qo'shiq:* {song_title}\n\n"
-                    "❌ YouTube'dan yuklab bo'lmadi.",
-                    parse_mode="Markdown",
-                )
+                # YouTube natija yo'q — faqat Shazam natijasini ko'rsat
+                text = f"Ijrochi: *{artist}*\nQo'shiq nomi: *{song_title}*"
+                await status.delete()
+                if coverart:
+                    await update.message.reply_photo(coverart, caption=text, parse_mode="Markdown")
+                else:
+                    await update.message.reply_text(text, parse_mode="Markdown")
                 return
 
             # Natijalarni saqlash
             search_key = uuid.uuid4().hex[:10]
-            SEARCH_STORE[search_key] = [
-                {
-                    "url": e.get("url") or e.get("id", ""),
+            SEARCH_STORE[search_key] = []
+            for e in entries:
+                vid_id = e.get("id") or e.get("url", "")
+                full_url = f"https://www.youtube.com/watch?v={vid_id}" if not vid_id.startswith("http") else vid_id
+                SEARCH_STORE[search_key].append({
+                    "url": full_url,
                     "title": e.get("title", "Noma'lum"),
                     "duration": e.get("duration"),
-                }
-                for e in entries
-            ]
+                })
 
             # Ro'yxat matni
             lines = []
@@ -490,18 +481,14 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 + "\n".join(lines)
             )
 
-            # Tugmalar: Video + 1 2 3 4 5
+            # Faqat raqamli tugmalar (audio yuklab olish)
             n = len(SEARCH_STORE[search_key])
             keyboard = [
-                [InlineKeyboardButton("📼 Video", callback_data=f"yt:video:{search_key}:0")],
                 [
                     InlineKeyboardButton(str(i + 1), callback_data=f"yt:audio:{search_key}:{i}")
                     for i in range(n)
                 ],
             ]
-
-            images = track.get("images", {})
-            coverart = images.get("coverarthq") or images.get("coverart")
 
             await status.delete()
 
