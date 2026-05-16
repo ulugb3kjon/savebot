@@ -360,6 +360,83 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+# ─── shazam audio downloader (SoundCloud → YouTube fallback) ─────────────────
+
+async def download_shazam_audio(query: str, yt_url: str, status_msg, reply_target):
+    loop = asyncio.get_event_loop()
+
+    audio_postprocessors = [
+        {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
+    ]
+
+    def _base_opts(tmpdir):
+        opts = {
+            "format": "bestaudio/best",
+            "outtmpl": os.path.join(tmpdir, "%(title).80s.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "postprocessors": audio_postprocessors,
+        }
+        if COOKIES_FILE:
+            opts["cookiefile"] = COOKIES_FILE
+        return opts
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        info = None
+
+        # 1) SoundCloud
+        sc_opts = _base_opts(tmpdir)
+        try:
+            info = await loop.run_in_executor(
+                None, lambda: _sync_download(sc_opts, f"scsearch1:{query}")
+            )
+            logger.info("SoundCloud: topildi — %s", query)
+        except Exception as e:
+            logger.warning("SoundCloud topilmadi: %s", str(e)[:120])
+
+        # 2) YouTube fallback (tv client, audio-only format 140)
+        if not info:
+            yt_opts = _base_opts(tmpdir)
+            yt_opts["format"] = "140/bestaudio/best"
+            yt_opts["extractor_args"] = {
+                "youtube": {"player_client": ["tv", "ios"], "player_skip": ["webpage"]}
+            }
+            dl_url = yt_url if yt_url.startswith("http") else f"ytsearch1:{query}"
+            try:
+                info = await loop.run_in_executor(
+                    None, lambda: _sync_download(yt_opts, dl_url)
+                )
+                logger.info("YouTube fallback: topildi — %s", dl_url)
+            except Exception as e:
+                logger.warning("YouTube fallback ham xato: %s", str(e)[:120])
+
+        if not info:
+            await status_msg.edit_text(
+                "❌ Bu qo'shiq yuklab bo'lmadi.\n"
+                "SoundCloud va YouTube ikkalasida ham topilmadi.\n"
+                "Boshqa variant tanlang yoki qo'shiq nomini to'g'ridan-to'g'ri yuboring."
+            )
+            return
+
+        title = (info.get("title") or "audio")[:100]
+        files = [f for f in Path(tmpdir).iterdir() if f.is_file()]
+        if not files:
+            await status_msg.edit_text("❌ Fayl topilmadi.")
+            return
+
+        filepath = files[0]
+        if filepath.stat().st_size > MAX_FILE_SIZE:
+            mb = filepath.stat().st_size // (1024 * 1024)
+            await status_msg.edit_text(f"❌ Fayl {mb} MB — Telegram limiti 50 MB.")
+            return
+
+        await status_msg.edit_text("📤 Yuborilmoqda...")
+        with open(filepath, "rb") as fh:
+            await reply_target.reply_audio(fh, title=title, write_timeout=120)
+        await status_msg.delete()
+
+
 # ─── callback handler ─────────────────────────────────────────────────────────
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -401,20 +478,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         entry = entries[index]
-        # SoundCloud: cloud IP'lardan ishlaydi, YouTube bot detection yo'q
-        sc_url = f"scsearch1:{song_query or entry['title']}"
-        url_key = uuid.uuid4().hex[:10]
-        URL_STORE[url_key] = sc_url
+        search_q = song_query or entry["title"]
+        yt_url = entry.get("url", "")
+        if yt_url and not yt_url.startswith("http"):
+            yt_url = f"https://www.youtube.com/watch?v={yt_url}"
 
         status = await query.message.reply_text("⏬ Yuklanmoqda... iltimos kuting")
-        await download_and_send(
-            update, context, sc_url,
-            quality="audio",
-            platform="soundcloud",
-            url_key=url_key,
-            status_msg=status,
-            reply_to=query.message,
-        )
+        await download_shazam_audio(search_q, yt_url, status, query.message)
         return
 
 
