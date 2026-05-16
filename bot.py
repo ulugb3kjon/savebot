@@ -294,7 +294,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # pin.it → clean pinterest.com/pin/ID/ URLga aylantir (yt-dlp pin.it taniy olmaydi)
     if "pin.it" in url:
-        url = await resolve_pinterest_short_url(url)
+        resolved = await resolve_pinterest_short_url(url)
+        if "pin.it" in resolved:
+            # Server pin.it domeniga yeta olmadi — foydalanuvchiga tushuntir
+            await update.message.reply_text(
+                "📌 *pin.it qisqa linki ishlamadi*\n\n"
+                "Server `pin.it` domeniga ulanolmayapti.\n\n"
+                "*Shunday qiling:*\n"
+                "1. Brauzerda Pinterest ni oching\n"
+                "2. Pin sahifasini oching\n"
+                "3. Yuqoridagi to'liq URL ni nusxalang\n"
+                "   (masalan: `pinterest.com/pin/123456789/`)\n"
+                "4. Shu URLni yuboring",
+                parse_mode="Markdown"
+            )
+            return
+        url = resolved
 
     platform = detect_platform(url)
 
