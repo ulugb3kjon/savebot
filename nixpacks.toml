@@ -1,8 +1,9 @@
 [phases.setup]
-nixPkgs = ["python312", "python312Packages.pip", "python312Packages.setuptools"]
+nixPkgs = ["python312", "python312Packages.pip"]
+cmds = ["python3 -m venv /opt/venv"]
 
 [phases.install]
-cmds = ["pip install --break-system-packages -r requirements.txt"]
+cmds = ["/opt/venv/bin/pip install -r requirements.txt"]
 
 [start]
-cmd = "python3 bot.py"
+cmd = "/opt/venv/bin/python bot.py"
