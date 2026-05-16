@@ -698,7 +698,7 @@ async def async_main():
                 allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=True,
             )
-            logger.info("Bot webhook mode da ishga tushdi: %s", webhook_url)
+            logger.info("=== BOT WEBHOOK MODE DA ISHGA TUSHDI: %s ===", webhook_url)
             await asyncio.Event().wait()
             await app.bot.delete_webhook()
             await app.stop()
