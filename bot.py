@@ -32,8 +32,10 @@ YOUTUBE_COOKIES = os.environ.get("YOUTUBE_COOKIES", "")
 
 COOKIES_FILE = "/tmp/yt_cookies.txt"
 if YOUTUBE_COOKIES:
+    cookie_content = YOUTUBE_COOKIES.replace('\\n', '\n')
     with open(COOKIES_FILE, "w") as _f:
-        _f.write(YOUTUBE_COOKIES)
+        _f.write(cookie_content)
+    logging.getLogger(__name__).info("Cookies yuklandi: %d qator", cookie_content.count('\n'))
 else:
     COOKIES_FILE = None
 
@@ -145,7 +147,7 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
         base["cookiefile"] = COOKIES_FILE
 
     if quality == "audio":
-        base["format"] = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best"
+        base["format"] = "bestaudio/best[ext=mp4]/best"
         base["postprocessors"] = [
             {
                 "key": "FFmpegExtractAudio",
