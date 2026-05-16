@@ -93,6 +93,8 @@ def detect_platform(url: str) -> str:
     u = url.lower()
     if "youtube.com" in u or "youtu.be" in u:
         return "youtube"
+    if "soundcloud.com" in u:
+        return "soundcloud"
     if "instagram.com" in u:
         return "instagram"
     if "tiktok.com" in u:
@@ -115,10 +117,9 @@ def _sync_search(query: str, limit: int = 5) -> list:
         "no_warnings": True,
         "extract_flat": True,
         "playlist_items": f"1:{limit}",
-        "extractor_args": {"youtube": {"player_client": ["ios", "android", "web_embedded"]}},
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+        info = ydl.extract_info(f"scsearch{limit}:{query}", download=False)
         return info.get("entries", []) if info else []
 
 
@@ -143,6 +144,17 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
         ]
         if platform == "youtube":
             base.update(youtube_args)
+        return base
+
+    if platform == "soundcloud":
+        base["format"] = "bestaudio/best"
+        base["postprocessors"] = [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }
+        ]
         return base
 
     if platform == "youtube":
@@ -302,7 +314,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await download_and_send(
             update, context, url,
             quality="audio",
-            platform="youtube",
+            platform=detect_platform(url),
             url_key=url_key,
             status_msg=status,
             reply_to=query.message,
@@ -461,8 +473,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             search_key = uuid.uuid4().hex[:10]
             SEARCH_STORE[search_key] = []
             for e in entries:
-                vid_id = e.get("id") or e.get("url", "")
-                full_url = f"https://www.youtube.com/watch?v={vid_id}" if not vid_id.startswith("http") else vid_id
+                full_url = e.get("url") or e.get("webpage_url") or e.get("id", "")
+                if full_url and not full_url.startswith("http"):
+                    full_url = f"https://soundcloud.com/{full_url}"
                 SEARCH_STORE[search_key].append({
                     "url": full_url,
                     "title": e.get("title", "Noma'lum"),
