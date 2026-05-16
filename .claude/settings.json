@@ -10,7 +10,10 @@
       "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot add Dockerfile nixpacks.toml)",
       "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot commit -m \"Switch to Dockerfile for reliable Python+ffmpeg build\")",
       "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot add -A)",
-      "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot commit -m \"Remove nixpacks.toml — use Dockerfile only\")"
+      "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot commit -m \"Remove nixpacks.toml — use Dockerfile only\")",
+      "Bash(curl -s -X POST https://backboard.railway.app/graphql/v2 -H 'Authorization: Bearer 3f1199de-b15c-4033-a69d-499326c7b78b' -H 'Content-Type: application/json' -d '{\"query\":\"{ buildLogs\\(deploymentId: \\\\\"2b78d517-dbef-43f3-bfea-2567a0c3ad13\\\\\", limit: 200\\) { message } }\"}')",
+      "Bash(curl -s -X POST https://backboard.railway.app/graphql/v2 -H 'Authorization: Bearer 3f1199de-b15c-4033-a69d-499326c7b78b' -H 'Content-Type: application/json' -d '{\"query\":\"{ __type\\(name: \\\\\"Builder\\\\\"\\) { enumValues { name } } }\"}')",
+      "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot commit -m \"Fix: use python3 -m pip in nixpacks install, remove Dockerfile\")"
     ]
   }
 }
