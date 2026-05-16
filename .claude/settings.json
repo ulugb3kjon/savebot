@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -X POST https://backboard.railway.app/graphql/v2 -H 'Authorization: Bearer 3f1199de-b15c-4033-a69d-499326c7b78b' -H 'Content-Type: application/json' -d '{\"query\": \"{ buildLogs\\(deploymentId: \\\\\"eca336ab-5d64-4d8f-b885-35a4a202ae98\\\\\", limit: 50\\) { message } }\"}')",
+      "Bash(python3 -c ' *)",
+      "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot add nixpacks.toml)",
+      "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot commit -m \"Fix nixpacks: remove explicit python312, let Nixpacks auto-detect Python\")",
+      "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot push origin main)",
+      "Bash(curl -s -X POST https://backboard.railway.app/graphql/v2 -H 'Authorization: Bearer 3f1199de-b15c-4033-a69d-499326c7b78b' -H 'Content-Type: application/json' -d '{\"query\":\"mutation { serviceInstanceDeploy\\(serviceId: \\\\\"91a078b0-b5b0-4354-8ce1-a2de8c3ad15f\\\\\", environmentId: \\\\\"3943c245-0a62-4621-83fb-0dc2359e9951\\\\\"\\) }\"}')",
+      "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot add Dockerfile nixpacks.toml)",
+      "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot commit -m \"Switch to Dockerfile for reliable Python+ffmpeg build\")",
+      "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot add -A)",
+      "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot commit -m \"Remove nixpacks.toml — use Dockerfile only\")"
+    ]
+  }
+}
