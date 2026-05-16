@@ -15,7 +15,6 @@ import yt_dlp
 from aiohttp import web
 from shazamio import Shazam
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import Conflict
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -32,22 +31,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-YOUTUBE_COOKIES = os.environ.get("YOUTUBE_COOKIES", "")
 PORT = int(os.environ.get("PORT", "8080"))
-
-COOKIES_FILE = "/tmp/yt_cookies.txt"
-if YOUTUBE_COOKIES:
-    cookie_content = YOUTUBE_COOKIES.replace('\\n', '\n')
-    with open(COOKIES_FILE, "w") as _f:
-        _f.write(cookie_content)
-    logging.getLogger(__name__).info("Cookies yuklandi: %d qator", cookie_content.count('\n'))
-else:
-    COOKIES_FILE = None
 
 URL_REGEX = re.compile(
     r"https?://(?:www\.)?"
-    r"(?:youtube\.com/(?:watch|shorts|embed|live)|youtu\.be/"
-    r"|instagram\.com/"
+    r"(?:instagram\.com/"
     r"|tiktok\.com/"
     r"|(?:twitter|x)\.com/"
     r"|(?:facebook\.com|fb\.watch)/"
@@ -57,7 +45,7 @@ URL_REGEX = re.compile(
 )
 
 URL_STORE: dict[str, str] = {}
-SEARCH_STORE: dict[str, list] = {}
+SEARCH_STORE: dict[str, dict] = {}
 MAX_FILE_SIZE = 50 * 1024 * 1024
 
 INSTAGRAM_HEADERS = {
@@ -69,13 +57,6 @@ INSTAGRAM_HEADERS = {
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
-
-def fmt_duration(seconds) -> str:
-    if not seconds:
-        return ""
-    m, s = divmod(int(seconds), 60)
-    return f"{m}:{s:02d}"
-
 
 def convert_to_wav(src: str, dst: str) -> bool:
     try:
@@ -106,10 +87,6 @@ def convert_to_wav(src: str, dst: str) -> bool:
 
 def detect_platform(url: str) -> str:
     u = url.lower()
-    if "youtube.com" in u or "youtu.be" in u:
-        return "youtube"
-    if "soundcloud.com" in u:
-        return "soundcloud"
     if "instagram.com" in u:
         return "instagram"
     if "tiktok.com" in u:
@@ -129,7 +106,6 @@ def _sync_download(ydl_opts: dict, url: str):
 
 
 def _sync_resolve_pin_url(url: str) -> str:
-    """pin.it → pinterest.com/pin/ID/ URL. httpx + aiohttp fallback."""
     import httpx
 
     _headers = {
@@ -142,7 +118,6 @@ def _sync_resolve_pin_url(url: str) -> str:
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    # httpx bilan sinab ko'r (urllib3 stack, aiohttp'dan farq qiladi)
     try:
         with httpx.Client(follow_redirects=True, timeout=30, headers=_headers) as client:
             resp = client.get(url)
@@ -155,7 +130,7 @@ def _sync_resolve_pin_url(url: str) -> str:
     except Exception as e:
         logger.warning("httpx pin.it resolve xatosi: %s", e)
 
-    return url  # resolve muvaffaqiyatsiz — original qaytaramiz
+    return url
 
 
 async def resolve_pinterest_short_url(url: str) -> str:
@@ -163,126 +138,13 @@ async def resolve_pinterest_short_url(url: str) -> str:
     return await loop.run_in_executor(None, _sync_resolve_pin_url, url)
 
 
-async def _cobalt_download(url: str, quality: str, tmpdir: str) -> str | None:
-    """cobalt.tools API orqali YouTube yuklab olish (Railway IP blokirovkasini chetlab o'tish)."""
-    from aiohttp import ClientSession, ClientTimeout
-
-    is_audio = quality == "audio"
-    vq = {"360": "360", "720": "720", "1080": "1080"}.get(quality, "720")
-    ext = ".mp3" if is_audio else ".mp4"
-    filepath = os.path.join(tmpdir, f"cobalt{ext}")
-
-    payload = {
-        "url": url,
-        "downloadMode": "audio" if is_audio else "auto",
-        "audioFormat": "mp3",
-        "audioBitrate": "192",
-        "videoQuality": vq,
-    }
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
-
-    try:
-        async with ClientSession() as session:
-            async with session.post(
-                "https://api.cobalt.tools/",
-                json=payload,
-                headers=headers,
-                timeout=ClientTimeout(total=30),
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning("cobalt API %d qaytardi", resp.status)
-                    return None
-                data = await resp.json()
-
-            status_c = data.get("status")
-            dl_url = data.get("url")
-            if status_c not in ("redirect", "tunnel") or not dl_url:
-                logger.warning("cobalt: status=%s data=%s", status_c, str(data)[:150])
-                return None
-
-            async with session.get(dl_url, timeout=ClientTimeout(total=300)) as dl_resp:
-                if dl_resp.status != 200:
-                    logger.warning("cobalt yuklab olish %d", dl_resp.status)
-                    return None
-                with open(filepath, "wb") as f:
-                    async for chunk in dl_resp.content.iter_chunked(65536):
-                        f.write(chunk)
-
-        if os.path.exists(filepath) and os.path.getsize(filepath) > 1000:
-            logger.info("cobalt OK: %d bayt", os.path.getsize(filepath))
-            return filepath
-        if os.path.exists(filepath):
-            os.unlink(filepath)
-        return None
-    except Exception as exc:
-        logger.warning("cobalt xatosi: %s", str(exc)[:120])
-        if os.path.exists(filepath):
-            try:
-                os.unlink(filepath)
-            except OSError:
-                pass
-        return None
-
-
-def _sync_search(query: str, limit: int = 5) -> list:
-    # Request 2x to compensate for any filtered-out entries
-    fetch = limit * 2
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "extract_flat": True,
-        "playlist_items": f"1:{fetch}",
-    }
-    if COOKIES_FILE:
-        ydl_opts["cookiefile"] = COOKIES_FILE
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(f"ytsearch{fetch}:{query}", download=False)
-        entries = [e for e in (info.get("entries", []) if info else []) if e]
-        return entries[:limit]
-
-
-def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
+def build_ydl_opts(tmpdir: str, platform: str = "other") -> dict:
     base = {
         "outtmpl": os.path.join(tmpdir, "%(title).80s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
     }
-
-    if COOKIES_FILE:
-        base["cookiefile"] = COOKIES_FILE
-
-    if quality == "audio":
-        base["format"] = "bestaudio/best"
-        base["postprocessors"] = [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }
-        ]
-        if platform == "youtube":
-            base["extractor_args"] = {
-                "youtube": {"player_client": ["web", "android", "android_embedded", "ios", "tv"]}
-            }
-        return base
-
-    if platform == "youtube":
-        height = {"360": 360, "720": 720, "1080": 1080}.get(quality, 720)
-        base["format"] = (
-            f"best[height<={height}][ext=mp4]"
-            f"/bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]"
-            f"/bestvideo[height<={height}]+bestaudio"
-            f"/best[height<={height}]/best"
-        )
-        base["merge_output_format"] = "mp4"
-        base["extractor_args"] = {
-            "youtube": {"player_client": ["web", "android", "android_embedded", "ios", "tv"]}
-        }
-        return base
 
     if platform == "instagram":
         base["format"] = "best[ext=mp4]/best[ext=webm]/best"
@@ -326,14 +188,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "👋 *Salom! Media yuklovchi botga xush kelibsiz!*\n\n"
         "📹 *Qo'llab-quvvatlanadigan platformalar:*\n"
-        "• 🔴 YouTube — video yoki audio\n"
         "• 📷 Instagram — post / reel / story\n"
         "• 🎵 TikTok — watermarksiz\n"
         "• 🐦 Twitter / X\n"
         "• 👥 Facebook\n"
         "• 📌 Pinterest — rasm / video\n\n"
         "🎵 *Shazam funksiyasi:*\n"
-        "Ovozli xabar, audio yoki video yuboring → qo'shiq aniqlanib, yuklab olish variantlari chiqadi!\n\n"
+        "Ovozli xabar, audio yoki video yuboring → qo'shiq aniqlanib, "
+        "SoundCloud'dan MP3 yuklab beradi!\n\n"
         "💡 *Foydalanish:* Shunchaki link yoki ovozli xabar yuboring."
     )
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -342,13 +204,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "📖 *Yordam*\n\n"
-        "*1. Video / Audio yuklash:*\n"
+        "*1. Video yuklash:*\n"
         "• Linkni yuboring — bot platformani o'zi aniqlaydi\n"
-        "• YouTube uchun sifat tanlash oynasi chiqadi\n\n"
+        "• Instagram, TikTok, Twitter, Facebook, Pinterest ishlaydi\n\n"
         "*2. Musiqa aniqlash 🎵 (Shazam):*\n"
         "• Ovozli xabar yoki video yuboring\n"
-        "• Bot qo'shiqni topib, YouTube'dan 5 ta variant ko'rsatadi\n"
-        "• Raqamga bosing → audio yuklanadi\n\n"
+        "• Bot qo'shiqni topib, *⬇️ Yuklab olish* tugmasini chiqaradi\n"
+        "• Tugmaga bosing → SoundCloud'dan MP3 yuboriladi\n\n"
         "*3. Buyruqlar:*\n"
         "/start — boshlash\n"
         "/help — yordam\n\n"
@@ -371,11 +233,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     url = matches[0]
 
-    # pin.it → clean pinterest.com/pin/ID/ URLga aylantir (yt-dlp pin.it taniy olmaydi)
     if "pin.it" in url:
         resolved = await resolve_pinterest_short_url(url)
         if "pin.it" in resolved:
-            # Server pin.it domeniga yeta olmadi — foydalanuvchiga tushuntir
             await update.message.reply_text(
                 "📌 *pin.it qisqa linki ishlamadi*\n\n"
                 "Server `pin.it` domeniga ulanolmayapti.\n\n"
@@ -385,73 +245,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "3. Yuqoridagi to'liq URL ni nusxalang\n"
                 "   (masalan: `pinterest.com/pin/123456789/`)\n"
                 "4. Shu URLni yuboring",
-                parse_mode="Markdown"
+                parse_mode="Markdown",
             )
             return
         url = resolved
 
     platform = detect_platform(url)
-
     url_key = uuid.uuid4().hex[:10]
     URL_STORE[url_key] = url
 
-    if platform == "youtube":
-        keyboard = [
-            [
-                InlineKeyboardButton("📹 360p", callback_data=f"dl:360:{url_key}"),
-                InlineKeyboardButton("📹 720p", callback_data=f"dl:720:{url_key}"),
-                InlineKeyboardButton("📹 1080p", callback_data=f"dl:1080:{url_key}"),
-            ],
-            [
-                InlineKeyboardButton("🎵 Faqat audio (MP3)", callback_data=f"dl:audio:{url_key}"),
-            ],
-        ]
-        await update.message.reply_text(
-            "🎬 *YouTube* — sifatni tanlang:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
-        )
-    else:
-        icon = {"instagram": "📷", "tiktok": "🎵", "twitter": "🐦", "facebook": "👥", "pinterest": "📌"}.get(platform, "🌐")
-        status = await update.message.reply_text(f"{icon} Yuklanmoqda... iltimos kuting ⏳")
-        await download_and_send(
-            update, context, url,
-            quality="best",
-            platform=platform,
-            url_key=url_key,
-            status_msg=status,
-            reply_to=update.message,
-        )
+    icon = {
+        "instagram": "📷",
+        "tiktok": "🎵",
+        "twitter": "🐦",
+        "facebook": "👥",
+        "pinterest": "📌",
+    }.get(platform, "🌐")
+    status = await update.message.reply_text(f"{icon} Yuklanmoqda... iltimos kuting ⏳")
+    await download_and_send(
+        update, context, url,
+        platform=platform,
+        url_key=url_key,
+        status_msg=status,
+        reply_to=update.message,
+    )
 
 
-# ─── shazam audio downloader (SoundCloud → YouTube fallback) ─────────────────
+# ─── shazam audio downloader (SoundCloud) ────────────────────────────────────
 
-async def download_shazam_audio(query: str, yt_url: str, status_msg, reply_target):
+async def download_shazam_audio(query: str, status_msg, reply_target):
     loop = asyncio.get_event_loop()
 
-    audio_postprocessors = [
-        {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
-    ]
-
-    def _base_opts(tmpdir):
-        opts = {
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sc_opts = {
             "format": "bestaudio/best",
             "outtmpl": os.path.join(tmpdir, "%(title).80s.%(ext)s"),
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
-            "postprocessors": audio_postprocessors,
+            "postprocessors": [
+                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
+            ],
         }
-        if COOKIES_FILE:
-            opts["cookiefile"] = COOKIES_FILE
-        return opts
 
-    with tempfile.TemporaryDirectory() as tmpdir:
         info = None
-        cobalt_path = None
-
-        # 1) SoundCloud
-        sc_opts = _base_opts(tmpdir)
         try:
             info = await loop.run_in_executor(
                 None, lambda: _sync_download(sc_opts, f"scsearch1:{query}")
@@ -460,50 +297,20 @@ async def download_shazam_audio(query: str, yt_url: str, status_msg, reply_targe
         except Exception as e:
             logger.warning("SoundCloud topilmadi: %s", str(e)[:120])
 
-        # 2) cobalt.tools (YouTube URL orqali, IP blokirovkasiz)
         if not info:
-            cobalt_url = yt_url if yt_url.startswith("http") else None
-            if cobalt_url:
-                cobalt_path = await _cobalt_download(cobalt_url, "audio", tmpdir)
-                if cobalt_path:
-                    logger.info("cobalt audio: topildi — %s", cobalt_url)
-
-        # 3) yt-dlp YouTube fallback
-        if not info and not cobalt_path:
-            yt_opts = _base_opts(tmpdir)
-            yt_opts["format"] = "140/bestaudio/best"
-            yt_opts["extractor_args"] = {
-                "youtube": {
-                    "player_client": ["web", "android", "android_embedded", "ios", "tv"],
-                }
-            }
-            dl_url = yt_url if yt_url.startswith("http") else f"ytsearch1:{query}"
-            try:
-                info = await loop.run_in_executor(
-                    None, lambda: _sync_download(yt_opts, dl_url)
-                )
-                logger.info("YouTube yt-dlp: topildi — %s", dl_url)
-            except Exception as e:
-                logger.warning("YouTube yt-dlp ham xato: %s", str(e)[:120])
-
-        if not info and not cobalt_path:
             await status_msg.edit_text(
-                "❌ Bu qo'shiq yuklab bo'lmadi.\n"
-                "Boshqa variant tanlang yoki qo'shiq nomini to'g'ridan-to'g'ri yuboring."
+                "❌ Bu qo'shiq SoundCloud'da topilmadi.\n"
+                "Boshqa qo'shiq yuboring."
             )
             return
 
-        if cobalt_path:
-            filepath = Path(cobalt_path)
-            title = query[:100]
-        else:
-            title = (info.get("title") or "audio")[:100]
-            files = [f for f in Path(tmpdir).iterdir() if f.is_file()]
-            if not files:
-                await status_msg.edit_text("❌ Fayl topilmadi.")
-                return
-            filepath = files[0]
+        title = (info.get("title") or "audio")[:100]
+        files = [f for f in Path(tmpdir).iterdir() if f.is_file()]
+        if not files:
+            await status_msg.edit_text("❌ Fayl topilmadi.")
+            return
 
+        filepath = files[0]
         if filepath.stat().st_size > MAX_FILE_SIZE:
             mb = filepath.stat().st_size // (1024 * 1024)
             await status_msg.edit_text(f"❌ Fayl {mb} MB — Telegram limiti 50 MB.")
@@ -532,7 +339,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         platform = detect_platform(url)
         await download_and_send(
             update, context, url,
-            quality=quality,
             platform=platform,
             url_key=url_key,
             callback_query=query,
@@ -540,29 +346,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if parts[0] == "yt" and len(parts) == 4:
-        _, action, search_key, idx_str = parts
-        index = int(idx_str)
-
-        store = SEARCH_STORE.get(search_key)
-        if not store:
-            await query.message.reply_text("❌ Ma'lumot eskirgan. Qaytadan yuboring.")
-            return
-        entries = store["entries"] if isinstance(store, dict) else store
-        song_query = store.get("query", "") if isinstance(store, dict) else ""
-
-        if index >= len(entries):
-            await query.message.reply_text("❌ Ma'lumot eskirgan. Qaytadan yuboring.")
-            return
-
-        entry = entries[index]
-        search_q = song_query or entry["title"]
-        yt_url = entry.get("url", "")
-        if yt_url and not yt_url.startswith("http"):
-            yt_url = f"https://www.youtube.com/watch?v={yt_url}"
-
-        status = await query.message.reply_text("⏬ Yuklanmoqda... iltimos kuting")
-        await download_shazam_audio(search_q, yt_url, status, query.message)
+    if parts[0] == "shazam" and len(parts) == 3:
+        _, action, search_key = parts
+        if action == "dl":
+            store = SEARCH_STORE.get(search_key)
+            if not store:
+                await query.message.reply_text("❌ Ma'lumot eskirgan. Qaytadan yuboring.")
+                return
+            song_query = store.get("query", "")
+            status = await query.message.reply_text("⏬ Yuklanmoqda... iltimos kuting")
+            await download_shazam_audio(song_query, status, query.message)
         return
 
 
@@ -572,7 +365,6 @@ async def download_and_send(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     url: str,
-    quality: str = "720",
     platform: str = "other",
     url_key: str = "",
     callback_query=None,
@@ -590,43 +382,7 @@ async def download_and_send(
         reply_target = reply_to or update.message
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # YouTube uchun cobalt.tools bilan sinab ko'ramiz (Railway IP blokirovkasini chetlab)
-        if platform == "youtube":
-            cobalt_path = await _cobalt_download(url, quality, tmpdir)
-            if cobalt_path:
-                size = os.path.getsize(cobalt_path)
-                if size > MAX_FILE_SIZE:
-                    mb = size // (1024 * 1024)
-                    await status.edit_text(
-                        f"❌ Fayl hajmi {mb} MB — Telegram limiti 50 MB.\n"
-                        "Iltimos, past sifat tanlang."
-                    )
-                    return
-                await status.edit_text("📤 Yuborilmoqda...")
-                is_audio_c = quality == "audio"
-                with open(cobalt_path, "rb") as fh:
-                    if is_audio_c:
-                        await reply_target.reply_audio(fh, title="YouTube Audio", write_timeout=120)
-                    else:
-                        audio_markup = None
-                        if url_key:
-                            audio_markup = InlineKeyboardMarkup([[
-                                InlineKeyboardButton(
-                                    "🎵 Qo'shiqni ham yuklash (MP3)",
-                                    callback_data=f"dl:audio:{url_key}"
-                                )
-                            ]])
-                        await reply_target.reply_video(
-                            fh,
-                            caption="🎬 YouTube",
-                            supports_streaming=True,
-                            reply_markup=audio_markup,
-                            write_timeout=120,
-                        )
-                await status.delete()
-                return
-
-        ydl_opts = build_ydl_opts(tmpdir, quality, platform)
+        ydl_opts = build_ydl_opts(tmpdir, platform)
 
         try:
             loop = asyncio.get_event_loop()
@@ -649,15 +405,14 @@ async def download_and_send(
             if size > MAX_FILE_SIZE:
                 mb = size // (1024 * 1024)
                 await status.edit_text(
-                    f"❌ Fayl hajmi {mb} MB — Telegram limiti 50 MB.\n"
-                    "Iltimos, past sifat tanlang."
+                    f"❌ Fayl hajmi {mb} MB — Telegram limiti 50 MB."
                 )
                 return
 
             await status.edit_text("📤 Yuborilmoqda...")
 
             ext = filepath.suffix.lower()
-            is_audio = quality == "audio" or ext in (".mp3", ".m4a", ".opus")
+            is_audio = ext in (".mp3", ".m4a", ".opus")
             is_image = ext in (".jpg", ".jpeg", ".png", ".webp")
 
             with open(filepath, "rb") as fh:
@@ -666,19 +421,10 @@ async def download_and_send(
                 elif is_image:
                     await reply_target.reply_photo(fh, caption=title, write_timeout=60)
                 else:
-                    audio_markup = None
-                    if url_key:
-                        audio_markup = InlineKeyboardMarkup([[
-                            InlineKeyboardButton(
-                                "🎵 Qo'shiqni ham yuklash (MP3)",
-                                callback_data=f"dl:audio:{url_key}"
-                            )
-                        ]])
                     await reply_target.reply_video(
                         fh,
                         caption=f"🎬 {title}",
                         supports_streaming=True,
-                        reply_markup=audio_markup,
                         write_timeout=120,
                     )
 
@@ -687,34 +433,8 @@ async def download_and_send(
         except yt_dlp.utils.DownloadError as e:
             err = str(e).lower()
             logger.warning("yt-dlp [%s]: %s", platform, err[:200])
-            if "sign in" in err or "bot" in err or "confirm" in err or (platform == "youtube" and ("unavailable" in err or "not available" in err)):
-                await status.edit_text("⏳ YouTube yuklash bajarilmoqda, iltimos kuting...")
-                # Retry with web client + cookies explicitly
-                try:
-                    retry_opts = build_ydl_opts(tmpdir, quality, platform)
-                    retry_opts["extractor_args"] = {"youtube": {"player_client": ["web"]}}
-                    loop2 = asyncio.get_event_loop()
-                    info2 = await loop2.run_in_executor(None, lambda: _sync_download(retry_opts, url))
-                    if info2:
-                        files2 = [f for f in Path(tmpdir).iterdir() if f.is_file()]
-                        if files2:
-                            fp2 = files2[0]
-                            if fp2.stat().st_size <= MAX_FILE_SIZE:
-                                title2 = (info2.get("title") or "media")[:100]
-                                ext2 = fp2.suffix.lower()
-                                is_audio2 = quality == "audio" or ext2 in (".mp3", ".m4a")
-                                with open(fp2, "rb") as fh2:
-                                    if is_audio2:
-                                        await reply_target.reply_audio(fh2, title=title2, write_timeout=120)
-                                    else:
-                                        await reply_target.reply_video(fh2, caption=f"🎬 {title2}", supports_streaming=True, write_timeout=120)
-                                await status.delete()
-                                return
-                except Exception:
-                    pass
-                await status.edit_text("❌ YouTube bu videoni yuklab bo'lmadi.\nInstagram, TikTok, Pinterest ishlaydi.")
-            elif "private" in err or "login" in err:
-                await status.edit_text("❌ Bu xususiy post yoki login talab qiladi.")
+            if "private" in err or "login" in err:
+                await status.edit_text("❌ Bu xususiy post — yuklab bo'lmadi.")
             elif "not available" in err or "unavailable" in err:
                 await status.edit_text("❌ Video mavjud emas yoki cheklov qo'yilgan.")
             elif "404" in err or "not found" in err:
@@ -726,7 +446,7 @@ async def download_and_send(
             await status.edit_text(f"❌ Kutilmagan xatolik: {str(e)[:200]}")
 
 
-# ─── Shazam + YouTube search ──────────────────────────────────────────────────
+# ─── Shazam ──────────────────────────────────────────────────────────────────
 
 async def shazam_and_reply(update: Update, file_id: str, status_msg):
     msg = update.message
@@ -758,55 +478,19 @@ async def shazam_and_reply(update: Update, file_id: str, status_msg):
             track = result.get("track", {})
             song_title = track.get("title", "Noma'lum")
             artist = track.get("subtitle", "Noma'lum ijrochi")
-
             query = f"{artist} {song_title}"
-            entries = await loop.run_in_executor(None, _sync_search, query, 5)
 
             images = track.get("images", {})
             coverart = images.get("coverarthq") or images.get("coverart")
 
-            if not entries:
-                text = f"Ijrochi: *{artist}*\nQo'shiq nomi: *{song_title}*"
-                await status_msg.delete()
-                if coverart:
-                    await msg.reply_photo(coverart, caption=text, parse_mode="Markdown")
-                else:
-                    await msg.reply_text(text, parse_mode="Markdown")
-                return
-
             search_key = uuid.uuid4().hex[:10]
-            entries_list = []
-            for e in entries:
-                vid_id = e.get("id") or e.get("url", "")
-                full_url = e.get("webpage_url") or (
-                    f"https://www.youtube.com/watch?v={vid_id}" if vid_id else ""
-                )
-                entries_list.append({
-                    "url": full_url,
-                    "title": e.get("title", "Noma'lum"),
-                    "duration": e.get("duration"),
-                })
-            SEARCH_STORE[search_key] = {"entries": entries_list, "query": query}
+            SEARCH_STORE[search_key] = {"query": query}
 
-            lines = []
-            for i, e in enumerate(entries_list, 1):
-                dur = fmt_duration(e.get("duration"))
-                t = e["title"][:55]
-                lines.append(f"*{i}.* {t}  *{dur}*" if dur else f"*{i}.* {t}")
-
-            caption = (
-                f"Ijrochi: *{artist}*\n"
-                f"Qo'shiq nomi: *{song_title}*\n\n"
-                + "\n".join(lines)
-            )
-
-            n = len(entries_list)
-            keyboard = [
-                [
-                    InlineKeyboardButton(str(i + 1), callback_data=f"yt:audio:{search_key}:{i}")
-                    for i in range(n)
-                ],
-            ]
+            caption = f"🎵 *{song_title}*\n👤 {artist}"
+            keyboard = [[
+                InlineKeyboardButton("⬇️ Yuklab olish (MP3)", callback_data=f"shazam:dl:{search_key}")
+            ]]
+            markup = InlineKeyboardMarkup(keyboard)
 
             await status_msg.delete()
 
@@ -814,18 +498,14 @@ async def shazam_and_reply(update: Update, file_id: str, status_msg):
                 await msg.reply_photo(
                     coverart,
                     caption=caption,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    reply_markup=markup,
                     parse_mode="Markdown",
                 )
             else:
-                await msg.reply_text(
-                    caption,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode="Markdown",
-                )
+                await msg.reply_text(caption, reply_markup=markup, parse_mode="Markdown")
 
         except Exception as e:
-            logger.exception("Shazam/search xatosi")
+            logger.exception("Shazam xatosi")
             await status_msg.edit_text(f"❌ Xatolik:\n`{str(e)[:200]}`", parse_mode="Markdown")
 
 
@@ -880,7 +560,6 @@ async def async_main():
     app.add_error_handler(error_handler)
 
     if RAILWAY_DOMAIN:
-        # Webhook mode — polling yo'q, 409 Conflict mumkin emas
         webhook_url = f"https://{RAILWAY_DOMAIN}/{BOT_TOKEN}"
 
         async def webhook_route(request):
@@ -917,7 +596,6 @@ async def async_main():
 
         await runner.cleanup()
     else:
-        # Polling mode — local ishlab chiqish uchun
         health_runner = await start_health_server(PORT)
         async with app:
             await app.start()
