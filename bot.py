@@ -8,12 +8,11 @@ import tempfile
 import uuid
 from pathlib import Path
 
-# Railway yangi container deploy qilganda eski containerni SIGTERM bilan to'xtatadi
-# Shu signal kelganda darhol chiqamiz — conflict bo'lmaydi
 signal.signal(signal.SIGTERM, lambda s, f: os._exit(0))
 
 import av
 import yt_dlp
+from aiohttp import web
 from shazamio import Shazam
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import Conflict
@@ -34,7 +33,6 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 YOUTUBE_COOKIES = os.environ.get("YOUTUBE_COOKIES", "")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 PORT = int(os.environ.get("PORT", "8080"))
 
 COOKIES_FILE = "/tmp/yt_cookies.txt"
@@ -60,7 +58,7 @@ URL_REGEX = re.compile(
 
 URL_STORE: dict[str, str] = {}
 SEARCH_STORE: dict[str, list] = {}
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+MAX_FILE_SIZE = 50 * 1024 * 1024
 
 INSTAGRAM_HEADERS = {
     "User-Agent": (
@@ -100,8 +98,7 @@ def convert_to_wav(src: str, dst: str) -> bool:
         finally:
             inp.close()
             out.close()
-        ok = os.path.exists(dst) and os.path.getsize(dst) > 200
-        return ok
+        return os.path.exists(dst) and os.path.getsize(dst) > 200
     except Exception as e:
         logger.error("convert_to_wav xatosi: %s", e)
         return False
@@ -132,17 +129,20 @@ def _sync_download(ydl_opts: dict, url: str):
 
 
 def _sync_search(query: str, limit: int = 5) -> list:
+    # Request 2x to compensate for any filtered-out entries
+    fetch = limit * 2
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "extract_flat": True,
-        "playlist_items": f"1:{limit}",
+        "playlist_items": f"1:{fetch}",
     }
     if COOKIES_FILE:
         ydl_opts["cookiefile"] = COOKIES_FILE
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
-        return info.get("entries", []) if info else []
+        info = ydl.extract_info(f"ytsearch{fetch}:{query}", download=False)
+        entries = [e for e in (info.get("entries", []) if info else []) if e]
+        return entries[:limit]
 
 
 def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
@@ -157,7 +157,7 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
         base["cookiefile"] = COOKIES_FILE
 
     if quality == "audio":
-        base["format"] = "bestaudio/best[ext=mp4]/best"
+        base["format"] = "bestaudio/best"
         base["postprocessors"] = [
             {
                 "key": "FFmpegExtractAudio",
@@ -165,6 +165,8 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
                 "preferredquality": "192",
             }
         ]
+        if platform == "youtube":
+            base["extractor_args"] = {"youtube": {"player_client": ["web"]}}
         return base
 
     if platform == "youtube":
@@ -176,21 +178,43 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
             f"/best[height<={height}]/best"
         )
         base["merge_output_format"] = "mp4"
+        base["extractor_args"] = {"youtube": {"player_client": ["web"]}}
         return base
 
-    base["format"] = "best[ext=mp4]/best[ext=webm]/best"
-
     if platform == "instagram":
+        base["format"] = "best[ext=mp4]/best[ext=webm]/best"
         base["http_headers"] = INSTAGRAM_HEADERS
         base["extractor_args"] = {"instagram": {"api": ["1"]}}
+        return base
 
     if platform == "tiktok":
         base["format"] = "download_addr-0/best[ext=mp4]/best"
+        return base
 
     if platform == "pinterest":
-        base["format"] = "best[ext=mp4]/best[ext=jpg]/best"
+        base["format"] = "best"
+        return base
 
+    base["format"] = "best[ext=mp4]/best[ext=webm]/best"
     return base
+
+
+# ─── health check server ─────────────────────────────────────────────────────
+
+async def _health_handler(request):
+    return web.Response(text="OK")
+
+
+async def start_health_server(port: int):
+    web_app = web.Application()
+    web_app.router.add_get("/", _health_handler)
+    web_app.router.add_get("/health", _health_handler)
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info("Health server port %d da ishga tushdi", port)
+    return runner
 
 
 # ─── command handlers ────────────────────────────────────────────────────────
@@ -203,9 +227,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 📷 Instagram — post / reel / story\n"
         "• 🎵 TikTok — watermarksiz\n"
         "• 🐦 Twitter / X\n"
-        "• 👥 Facebook\n\n"
+        "• 👥 Facebook\n"
+        "• 📌 Pinterest — rasm / video\n\n"
         "🎵 *Shazam funksiyasi:*\n"
-        "Ovozli xabar yoki audio fayl yuboring → qo'shiq aniqlanib, yuklab olish variantlari chiqadi!\n\n"
+        "Ovozli xabar, audio yoki video yuboring → qo'shiq aniqlanib, yuklab olish variantlari chiqadi!\n\n"
         "💡 *Foydalanish:* Shunchaki link yoki ovozli xabar yuboring."
     )
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -218,10 +243,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Linkni yuboring — bot platformani o'zi aniqlaydi\n"
         "• YouTube uchun sifat tanlash oynasi chiqadi\n\n"
         "*2. Musiqa aniqlash 🎵 (Shazam):*\n"
-        "• Ovozli xabar yuboring\n"
-        "• Bot qo'shiqni topib, YouTube'dan variantlar ko'rsatadi\n"
-        "• Raqamga bosing → audio yuklanadi\n"
-        "• Video tugmasiga bosing → video sifatini tanlang\n\n"
+        "• Ovozli xabar yoki video yuboring\n"
+        "• Bot qo'shiqni topib, YouTube'dan 5 ta variant ko'rsatadi\n"
+        "• Raqamga bosing → audio yuklanadi\n\n"
         "*3. Buyruqlar:*\n"
         "/start — boshlash\n"
         "/help — yordam\n\n"
@@ -285,7 +309,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     parts = query.data.split(":")
 
-    # dl:quality:url_key — oddiy download
     if parts[0] == "dl" and len(parts) == 3:
         _, quality, url_key = parts
         url = URL_STORE.get(url_key)
@@ -303,7 +326,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # yt:action:search_key:index — shazam natijasidan yuklab olish
     if parts[0] == "yt" and len(parts) == 4:
         _, action, search_key, idx_str = parts
         index = int(idx_str)
@@ -321,12 +343,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url_key = uuid.uuid4().hex[:10]
         URL_STORE[url_key] = url
 
-        # har doim audio yuklab yuboradi
         status = await query.message.reply_text("⏬ Yuklanmoqda... iltimos kuting")
         await download_and_send(
             update, context, url,
             quality="audio",
-            platform=detect_platform(url),
+            platform="youtube",
             url_key=url_key,
             status_msg=status,
             reply_to=query.message,
@@ -432,7 +453,6 @@ async def download_and_send(
 # ─── Shazam + YouTube search ──────────────────────────────────────────────────
 
 async def shazam_and_reply(update: Update, file_id: str, status_msg):
-    """Faylni yuklab, Shazam bilan aniqlaydi va natijani yuboradi."""
     msg = update.message
     loop = asyncio.get_event_loop()
 
@@ -463,10 +483,8 @@ async def shazam_and_reply(update: Update, file_id: str, status_msg):
             song_title = track.get("title", "Noma'lum")
             artist = track.get("subtitle", "Noma'lum ijrochi")
 
-            # YouTube'dan qidirish (jim)
             query = f"{artist} {song_title}"
             entries = await loop.run_in_executor(None, _sync_search, query, 5)
-            entries = [e for e in entries if e]
 
             images = track.get("images", {})
             coverart = images.get("coverarthq") or images.get("coverart")
@@ -480,7 +498,6 @@ async def shazam_and_reply(update: Update, file_id: str, status_msg):
                     await msg.reply_text(text, parse_mode="Markdown")
                 return
 
-            # Natijalarni saqlash
             search_key = uuid.uuid4().hex[:10]
             SEARCH_STORE[search_key] = []
             for e in entries:
@@ -494,7 +511,6 @@ async def shazam_and_reply(update: Update, file_id: str, status_msg):
                     "duration": e.get("duration"),
                 })
 
-            # Ro'yxat matni
             lines = []
             for i, e in enumerate(SEARCH_STORE[search_key], 1):
                 dur = fmt_duration(e.get("duration"))
@@ -507,7 +523,6 @@ async def shazam_and_reply(update: Update, file_id: str, status_msg):
                 + "\n".join(lines)
             )
 
-            # Faqat raqamli tugmalar (audio yuklab olish)
             n = len(SEARCH_STORE[search_key])
             keyboard = [
                 [
@@ -563,9 +578,11 @@ async def conflict_error_handler(update, context):
         logger.error("Xato: %s", context.error)
 
 
-def main():
+async def async_main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN muhit o'zgaruvchisi o'rnatilmagan!")
+
+    health_runner = await start_health_server(PORT)
 
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -579,8 +596,22 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_error_handler(conflict_error_handler)
 
-    logger.info("Bot polling rejimida ishga tushdi...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    async with app:
+        await app.start()
+        await app.updater.start_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+        )
+        logger.info("Bot ishga tushdi (polling mode)...")
+        await asyncio.Event().wait()  # SIGTERM → os._exit(0) kills this
+        await app.updater.stop()
+        await app.stop()
+
+    await health_runner.cleanup()
+
+
+def main():
+    asyncio.run(async_main())
 
 
 if __name__ == "__main__":
