@@ -38,9 +38,16 @@ URL_REGEX = re.compile(
     re.IGNORECASE,
 )
 
-# In-memory URL store (url_key → url) to keep callback_data short
 URL_STORE: dict[str, str] = {}
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB Telegram limit
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+
+# Instagram uchun mobil user-agent — ko'p hollarda yaxshiroq ishlaydi
+INSTAGRAM_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+    )
+}
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -65,13 +72,15 @@ def _sync_download(ydl_opts: dict, url: str):
         return ydl.extract_info(url, download=True)
 
 
-def build_ydl_opts(tmpdir: str, quality: str) -> dict:
+def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
     base = {
         "outtmpl": os.path.join(tmpdir, "%(title).80s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
     }
+
+    # Audio rejimi — barcha platformalar uchun
     if quality == "audio":
         base["format"] = "bestaudio/best"
         base["postprocessors"] = [
@@ -81,24 +90,33 @@ def build_ydl_opts(tmpdir: str, quality: str) -> dict:
                 "preferredquality": "192",
             }
         ]
-    elif quality == "360":
+        return base
+
+    # YouTube — foydalanuvchi sifat tanlab, ffmpeg bilan birlashtiradi
+    if platform == "youtube":
+        height = {"360": 360, "720": 720, "1080": 1080}.get(quality, 720)
         base["format"] = (
-            "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]"
-            "/best[height<=360][ext=mp4]/best[height<=360]/best"
+            f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]"
+            f"/bestvideo[height<={height}]+bestaudio"
+            f"/best[height<={height}][ext=mp4]"
+            f"/best[height<={height}]/best"
         )
         base["merge_output_format"] = "mp4"
-    elif quality == "1080":
-        base["format"] = (
-            "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]"
-            "/best[height<=1080][ext=mp4]/best[height<=1080]/best"
-        )
-        base["merge_output_format"] = "mp4"
-    else:  # default 720
-        base["format"] = (
-            "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]"
-            "/best[height<=720][ext=mp4]/best[height<=720]/best"
-        )
-        base["merge_output_format"] = "mp4"
+        return base
+
+    # Instagram, TikTok, Twitter, Facebook — ffmpeg talab qilmaydigan format
+    # "best[ext=mp4]" allaqachon video+audio birlashgan fayl beradi
+    base["format"] = "best[ext=mp4]/best[ext=webm]/best"
+
+    if platform == "instagram":
+        base["http_headers"] = INSTAGRAM_HEADERS
+        # Instagram ba'zan cookie talab qiladi; xato bo'lsa toza format sinab ko'ramiz
+        base["extractor_args"] = {"instagram": {"api": ["1"]}}
+
+    if platform == "tiktok":
+        # TikTok watermarksiz format
+        base["format"] = "download_addr-0/best[ext=mp4]/best"
+
     return base
 
 
@@ -114,7 +132,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🐦 Twitter / X\n"
         "• 👥 Facebook\n\n"
         "🎵 *Shazam funksiyasi:*\n"
-        "Ovozli xabar yoki audio yuboring → qo'shiq aniqlanadi!\n\n"
+        "Ovozli xabar yoki audio fayl yuboring → qo'shiq aniqlanadi!\n\n"
         "💡 *Foydalanish:* Shunchaki link yoki ovozli xabar yuboring."
     )
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -155,7 +173,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if platform == "youtube":
         url_key = uuid.uuid4().hex[:10]
         URL_STORE[url_key] = url
-
         keyboard = [
             [
                 InlineKeyboardButton("📹 360p", callback_data=f"dl:360:{url_key}"),
@@ -172,14 +189,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
     else:
-        icon = {
-            "instagram": "📷",
-            "tiktok": "🎵",
-            "twitter": "🐦",
-            "facebook": "👥",
-        }.get(platform, "🌐")
-        await update.message.reply_text(f"{icon} Yuklanmoqda... iltimos kuting ⏳")
-        await download_and_send(update, context, url, quality="720")
+        icon = {"instagram": "📷", "tiktok": "🎵", "twitter": "🐦", "facebook": "👥"}.get(platform, "🌐")
+        status = await update.message.reply_text(f"{icon} Yuklanmoqda... iltimos kuting ⏳")
+        await download_and_send(update, context, url, quality="best", platform=platform, status_msg=status)
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -196,7 +208,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ URL eskirgan. Linkni qaytadan yuboring.")
         return
 
-    await download_and_send(update, context, url, quality=quality, callback_query=query)
+    await download_and_send(
+        update, context, url,
+        quality=quality,
+        platform="youtube",
+        callback_query=query,
+    )
 
 
 # ─── download & send ─────────────────────────────────────────────────────────
@@ -206,31 +223,36 @@ async def download_and_send(
     context: ContextTypes.DEFAULT_TYPE,
     url: str,
     quality: str = "720",
+    platform: str = "other",
     callback_query=None,
+    status_msg=None,
 ):
     if callback_query:
-        status_msg = await callback_query.edit_message_text("⏬ Yuklanmoqda... iltimos kuting")
+        status = await callback_query.edit_message_text("⏬ Yuklanmoqda... iltimos kuting")
         reply_target = callback_query.message
+    elif status_msg:
+        status = status_msg
+        reply_target = update.message
     else:
-        status_msg = await update.message.reply_text("⏬ Yuklanmoqda... iltimos kuting")
+        status = await update.message.reply_text("⏬ Yuklanmoqda... iltimos kuting")
         reply_target = update.message
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        ydl_opts = build_ydl_opts(tmpdir, quality)
+        ydl_opts = build_ydl_opts(tmpdir, quality, platform)
 
         try:
             loop = asyncio.get_event_loop()
             info = await loop.run_in_executor(None, lambda: _sync_download(ydl_opts, url))
 
             if not info:
-                await status_msg.edit_text("❌ Yuklab bo'lmadi. Link noto'g'ri bo'lishi mumkin.")
+                await status.edit_text("❌ Yuklab bo'lmadi. Link noto'g'ri bo'lishi mumkin.")
                 return
 
             title = (info.get("title") or "media")[:100]
-
             files = [f for f in Path(tmpdir).iterdir() if f.is_file()]
+
             if not files:
-                await status_msg.edit_text("❌ Fayl topilmadi.")
+                await status.edit_text("❌ Fayl topilmadi.")
                 return
 
             filepath = files[0]
@@ -238,17 +260,17 @@ async def download_and_send(
 
             if size > MAX_FILE_SIZE:
                 mb = size // (1024 * 1024)
-                await status_msg.edit_text(
+                await status.edit_text(
                     f"❌ Fayl hajmi {mb} MB — Telegram limiti 50 MB.\n"
                     "Iltimos, past sifat tanlang."
                 )
                 return
 
-            await status_msg.edit_text("📤 Yuborilmoqda...")
+            await status.edit_text("📤 Yuborilmoqda...")
 
+            ext = filepath.suffix.lower()
             with open(filepath, "rb") as fh:
-                ext = filepath.suffix.lower()
-                if quality == "audio" or ext in (".mp3", ".m4a", ".ogg", ".opus"):
+                if quality == "audio" or ext in (".mp3", ".m4a", ".opus"):
                     await reply_target.reply_audio(fh, title=title)
                 else:
                     await reply_target.reply_video(
@@ -257,158 +279,129 @@ async def download_and_send(
                         supports_streaming=True,
                     )
 
-            await status_msg.delete()
+            await status.delete()
 
         except yt_dlp.utils.DownloadError as e:
-            msg = str(e)
-            logger.warning("yt-dlp error for %s: %s", url, msg)
-            if "private" in msg.lower():
-                await status_msg.edit_text("❌ Bu xususiy post, yuklab bo'lmadi.")
-            elif "not available" in msg.lower() or "unavailable" in msg.lower():
-                await status_msg.edit_text("❌ Video mavjud emas yoki cheklov qo'yilgan.")
+            err = str(e).lower()
+            logger.warning("yt-dlp error [%s] %s: %s", platform, url, err)
+            if "private" in err or "login" in err:
+                await status.edit_text(
+                    "❌ Bu xususiy post yoki login talab qiladi.\n"
+                    "Story/highlight yuklab bo'lmaydi."
+                )
+            elif "not available" in err or "unavailable" in err:
+                await status.edit_text("❌ Video mavjud emas yoki cheklov qo'yilgan.")
+            elif "ffmpeg" in err:
+                await status.edit_text(
+                    "❌ Server konfiguratsiya xatosi (ffmpeg).\n"
+                    "Iltimos Railway'da ishga tushiring."
+                )
             else:
-                await status_msg.edit_text(f"❌ Yuklashda xatolik:\n{msg[:200]}")
+                await status.edit_text(f"❌ Yuklashda xatolik:\n`{str(e)[:200]}`", parse_mode="Markdown")
         except Exception as e:
-            logger.exception("Unexpected error for %s", url)
-            await status_msg.edit_text(f"❌ Kutilmagan xatolik: {str(e)[:200]}")
+            logger.exception("Unexpected error [%s] %s", platform, url)
+            await status.edit_text(f"❌ Kutilmagan xatolik: {str(e)[:200]}")
 
 
-# ─── Shazam handler ───────────────────────────────────────────────────────────
+# ─── Shazam ──────────────────────────────────────────────────────────────────
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     voice = update.message.voice or update.message.audio
     if not voice:
         return
 
-    status_msg = await update.message.reply_text("🎵 Musiqa aniqlanmoqda... iltimos kuting")
+    status = await update.message.reply_text("🎵 Musiqa aniqlanmoqda... iltimos kuting")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+    try:
+        tg_file = await context.bot.get_file(voice.file_id)
+
+        # OGG OPUS sifatida yuklab olamiz
+        with tempfile.NamedTemporaryFile(suffix=".oga", delete=False) as tmp:
+            oga_path = tmp.name
+        await tg_file.download_to_drive(oga_path)
+
+        # ffmpeg orqali WAV ga o'giramiz — Shazam WAV ni yaxshi o'qiydi
+        wav_path = oga_path.replace(".oga", ".wav")
         try:
-            voice_file = await context.bot.get_file(voice.file_id)
-            local_path = os.path.join(tmpdir, "audio.ogg")
-            await voice_file.download_to_drive(local_path)
-
-            shazam = Shazam()
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None, lambda: asyncio.run(shazam.recognize(local_path))
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", oga_path,
+                "-ar", "16000", "-ac", "1", "-f", "wav", wav_path,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
             )
+            await proc.communicate()
+            recognize_path = wav_path if os.path.exists(wav_path) and os.path.getsize(wav_path) > 0 else oga_path
+        except FileNotFoundError:
+            # ffmpeg yo'q (lokal test), to'g'ridan-to'g'ri sinab ko'ramiz
+            recognize_path = oga_path
 
-            if result and result.get("matches"):
-                track = result.get("track", {})
-                song_title = track.get("title", "Noma'lum")
-                artist = track.get("subtitle", "Noma'lum ijrochi")
+        shazam = Shazam()
+        result = await shazam.recognize(recognize_path)
 
-                # Genre
-                genre = ""
-                for section in track.get("sections", []):
-                    for meta in section.get("metadata", []):
-                        if meta.get("title") == "Genre":
-                            genre = meta.get("text", "")
+        # Vaqtinchalik fayllarni o'chiramiz
+        for p in (oga_path, wav_path):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
-                response = (
-                    f"🎵 *Qo'shiq topildi!*\n\n"
-                    f"🎤 *Ijrochi:* {artist}\n"
-                    f"🎶 *Qo'shiq:* {song_title}\n"
-                )
-                if genre:
-                    response += f"🎼 *Janr:* {genre}\n"
+        logger.info("Shazam result keys: %s", list(result.keys()) if result else "empty")
 
-                # Streaming links
-                for action in track.get("hub", {}).get("actions", []):
-                    if action.get("type") == "uri":
-                        uri = action.get("uri", "")
-                        if "spotify" in uri.lower():
-                            response += f"\n🟢 [Spotify'da tinglash]({uri})"
-                        elif "apple" in uri.lower():
-                            response += f"\n🍎 [Apple Music'da tinglash]({uri})"
+        if not result or not result.get("matches"):
+            await status.edit_text(
+                "❓ Qo'shiq aniqlanmadi.\n"
+                "• Ovozni kamida 5-10 soniya yuboring\n"
+                "• Shovqinsiz joy bo'lsin"
+            )
+            return
 
-                coverart = track.get("images", {}).get("coverarthq") or track.get("images", {}).get("coverart")
-                if coverart:
-                    await status_msg.delete()
-                    await update.message.reply_photo(
-                        coverart, caption=response, parse_mode="Markdown"
-                    )
-                else:
-                    await status_msg.edit_text(response, parse_mode="Markdown")
-            else:
-                await status_msg.edit_text(
-                    "❓ Qo'shiq aniqlanmadi.\n"
-                    "Ovoz aniqroq yoki uzunroq bo'lishi kerak."
-                )
+        track = result.get("track", {})
+        song_title = track.get("title", "Noma'lum")
+        artist = track.get("subtitle", "Noma'lum ijrochi")
 
-        except Exception as e:
-            logger.exception("Shazam error")
-            await status_msg.edit_text(f"❌ Musiqa aniqlashda xatolik: {str(e)[:150]}")
+        # Janr
+        genre = ""
+        for section in track.get("sections", []):
+            for meta in section.get("metadata", []):
+                if meta.get("title") == "Genre":
+                    genre = meta.get("text", "")
 
+        response = (
+            f"🎵 *Qo'shiq topildi!*\n\n"
+            f"🎤 *Ijrochi:* {artist}\n"
+            f"🎶 *Qo'shiq:* {song_title}\n"
+        )
+        if genre:
+            response += f"🎼 *Janr:* {genre}\n"
 
-async def handle_voice_async(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Wrapper that runs Shazam recognition correctly inside running event loop."""
-    voice = update.message.voice or update.message.audio
-    if not voice:
-        return
+        # Streaming havolalar
+        for action in track.get("hub", {}).get("actions", []):
+            if action.get("type") == "uri":
+                uri = action.get("uri", "")
+                if "spotify" in uri.lower():
+                    response += f"\n🟢 [Spotify'da tinglash]({uri})"
+                elif "apple" in uri.lower():
+                    response += f"\n🍎 [Apple Music'da tinglash]({uri})"
 
-    status_msg = await update.message.reply_text("🎵 Musiqa aniqlanmoqda... iltimos kuting")
+        # Muqova rasmni yuboramiz
+        images = track.get("images", {})
+        coverart = images.get("coverarthq") or images.get("coverart")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        try:
-            voice_file = await context.bot.get_file(voice.file_id)
-            local_path = os.path.join(tmpdir, "audio.ogg")
-            await voice_file.download_to_drive(local_path)
+        if coverart:
+            await status.delete()
+            await update.message.reply_photo(coverart, caption=response, parse_mode="Markdown")
+        else:
+            await status.edit_text(response, parse_mode="Markdown")
 
-            shazam = Shazam()
-            result = await shazam.recognize(local_path)
-
-            if result and result.get("matches"):
-                track = result.get("track", {})
-                song_title = track.get("title", "Noma'lum")
-                artist = track.get("subtitle", "Noma'lum ijrochi")
-
-                genre = ""
-                for section in track.get("sections", []):
-                    for meta in section.get("metadata", []):
-                        if meta.get("title") == "Genre":
-                            genre = meta.get("text", "")
-
-                response = (
-                    f"🎵 *Qo'shiq topildi!*\n\n"
-                    f"🎤 *Ijrochi:* {artist}\n"
-                    f"🎶 *Qo'shiq:* {song_title}\n"
-                )
-                if genre:
-                    response += f"🎼 *Janr:* {genre}\n"
-
-                for action in track.get("hub", {}).get("actions", []):
-                    if action.get("type") == "uri":
-                        uri = action.get("uri", "")
-                        if "spotify" in uri.lower():
-                            response += f"\n🟢 [Spotify'da tinglash]({uri})"
-                        elif "apple" in uri.lower():
-                            response += f"\n🍎 [Apple Music'da tinglash]({uri})"
-
-                coverart = (
-                    track.get("images", {}).get("coverarthq")
-                    or track.get("images", {}).get("coverart")
-                )
-                if coverart:
-                    await status_msg.delete()
-                    await update.message.reply_photo(
-                        coverart, caption=response, parse_mode="Markdown"
-                    )
-                else:
-                    await status_msg.edit_text(response, parse_mode="Markdown")
-            else:
-                await status_msg.edit_text(
-                    "❓ Qo'shiq aniqlanmadi.\n"
-                    "Ovoz aniqroq yoki uzunroq bo'lishi kerak."
-                )
-
-        except Exception as e:
-            logger.exception("Shazam error")
-            await status_msg.edit_text(f"❌ Musiqa aniqlashda xatolik: {str(e)[:150]}")
+    except Exception as e:
+        logger.exception("Shazam error")
+        await status.edit_text(
+            f"❌ Musiqa aniqlashda xatolik: `{str(e)[:200]}`",
+            parse_mode="Markdown",
+        )
 
 
-# ─── main ─────────────────────────────────────────────────────────────────────
+# ─── main ────────────────────────────────────────────────────────────────────
 
 def main():
     if not BOT_TOKEN:
@@ -419,8 +412,8 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice_async))
-    app.add_handler(MessageHandler(filters.AUDIO, handle_voice_async))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.AUDIO, handle_voice))
     app.add_handler(CallbackQueryHandler(handle_callback))
 
     logger.info("Bot ishga tushdi (polling mode)...")
