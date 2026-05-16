@@ -128,8 +128,8 @@ def _sync_download(ydl_opts: dict, url: str):
         return ydl.extract_info(url, download=True)
 
 
-async def resolve_short_url(url: str) -> str:
-    """pin.it kabi qisqa URLlarni to'liq URLga aylantiradi."""
+async def resolve_pinterest_short_url(url: str) -> str:
+    """pin.it → clean https://www.pinterest.com/pin/ID/ URL ga aylantiradi."""
     from aiohttp import ClientSession, ClientTimeout
     try:
         async with ClientSession() as session:
@@ -139,11 +139,16 @@ async def resolve_short_url(url: str) -> str:
                 headers={"User-Agent": "Mozilla/5.0"},
             ) as resp:
                 final = str(resp.url)
-                if final != url:
-                    logger.info("URL kengaytirildi: %s → %s", url, final)
-                return final
+        # Numeric pin ID ni ajratib, toza URL yasaymiz
+        m = re.search(r'/pin/(\d+)', final)
+        if m:
+            clean = f"https://www.pinterest.com/pin/{m.group(1)}/"
+            logger.info("Pinterest URL: %s → %s", url, clean)
+            return clean
+        logger.info("pin.it resolved: %s → %s", url, final)
+        return final
     except Exception as e:
-        logger.warning("URL kengaytirish xatosi: %s", e)
+        logger.warning("pin.it resolve xatosi: %s", e)
         return url
 
 
@@ -287,9 +292,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     url = matches[0]
 
-    # pin.it → to'liq pinterest.com URL ga aylantir (yt-dlp pin.it taniy olmaydi)
+    # pin.it → clean pinterest.com/pin/ID/ URLga aylantir (yt-dlp pin.it taniy olmaydi)
     if "pin.it" in url:
-        url = await resolve_short_url(url)
+        url = await resolve_pinterest_short_url(url)
 
     platform = detect_platform(url)
 
