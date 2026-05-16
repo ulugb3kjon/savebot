@@ -125,7 +125,6 @@ def _sync_search(query: str, limit: int = 5) -> list:
         "no_warnings": True,
         "extract_flat": True,
         "playlist_items": f"1:{limit}",
-        "extractor_args": {"youtube": {"player_client": ["ios", "android"]}},
     }
     if COOKIES_FILE:
         ydl_opts["cookiefile"] = COOKIES_FILE
@@ -142,25 +141,11 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
         "noplaylist": True,
     }
 
-    youtube_args = {"extractor_args": {"youtube": {"player_client": ["ios", "android", "web_embedded"]}}}
     if COOKIES_FILE:
-        youtube_args["cookiefile"] = COOKIES_FILE
+        base["cookiefile"] = COOKIES_FILE
 
     if quality == "audio":
-        base["format"] = "bestaudio/best"
-        base["postprocessors"] = [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }
-        ]
-        if platform == "youtube":
-            base.update(youtube_args)
-        return base
-
-    if platform == "soundcloud":
-        base["format"] = "bestaudio/best"
+        base["format"] = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best"
         base["postprocessors"] = [
             {
                 "key": "FFmpegExtractAudio",
@@ -179,7 +164,6 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
             f"/best[height<={height}]/best"
         )
         base["merge_output_format"] = "mp4"
-        base.update(youtube_args)
         return base
 
     base["format"] = "best[ext=mp4]/best[ext=webm]/best"
