@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 import os
+import signal
 import asyncio
 import logging
 import re
 import tempfile
 import uuid
 from pathlib import Path
+
+# Railway yangi container deploy qilganda eski containerni SIGTERM bilan to'xtatadi
+# Shu signal kelganda darhol chiqamiz — conflict bo'lmaydi
+signal.signal(signal.SIGTERM, lambda s, f: os._exit(0))
 
 import av
 import yt_dlp
@@ -48,6 +53,7 @@ URL_REGEX = re.compile(
     r"|tiktok\.com/"
     r"|(?:twitter|x)\.com/"
     r"|(?:facebook\.com|fb\.watch)/"
+    r"|(?:pinterest\.com|pin\.it)/"
     r")\S+",
     re.IGNORECASE,
 )
@@ -115,6 +121,8 @@ def detect_platform(url: str) -> str:
         return "twitter"
     if "facebook.com" in u or "fb.watch" in u:
         return "facebook"
+    if "pinterest.com" in u or "pin.it" in u:
+        return "pinterest"
     return "other"
 
 
@@ -178,6 +186,9 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
 
     if platform == "tiktok":
         base["format"] = "download_addr-0/best[ext=mp4]/best"
+
+    if platform == "pinterest":
+        base["format"] = "best[ext=mp4]/best[ext=jpg]/best"
 
     return base
 
@@ -254,7 +265,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
     else:
-        icon = {"instagram": "📷", "tiktok": "🎵", "twitter": "🐦", "facebook": "👥"}.get(platform, "🌐")
+        icon = {"instagram": "📷", "tiktok": "🎵", "twitter": "🐦", "facebook": "👥", "pinterest": "📌"}.get(platform, "🌐")
         status = await update.message.reply_text(f"{icon} Yuklanmoqda... iltimos kuting ⏳")
         await download_and_send(
             update, context, url,
@@ -379,10 +390,13 @@ async def download_and_send(
 
             ext = filepath.suffix.lower()
             is_audio = quality == "audio" or ext in (".mp3", ".m4a", ".opus")
+            is_image = ext in (".jpg", ".jpeg", ".png", ".webp")
 
             with open(filepath, "rb") as fh:
                 if is_audio:
                     await reply_target.reply_audio(fh, title=title)
+                elif is_image:
+                    await reply_target.reply_photo(fh, caption=title)
                 else:
                     audio_markup = None
                     if url_key:
@@ -565,18 +579,8 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_error_handler(conflict_error_handler)
 
-    if WEBHOOK_URL:
-        logger.info("Bot webhook rejimida ishga tushdi: %s", WEBHOOK_URL)
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            webhook_url=f"{WEBHOOK_URL}/webhook",
-            url_path="/webhook",
-            drop_pending_updates=True,
-        )
-    else:
-        logger.info("Bot polling rejimida ishga tushdi...")
-        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    logger.info("Bot polling rejimida ishga tushdi...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
