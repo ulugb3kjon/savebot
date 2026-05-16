@@ -470,9 +470,9 @@ async def download_and_send(
 
             with open(filepath, "rb") as fh:
                 if is_audio:
-                    await reply_target.reply_audio(fh, title=title)
+                    await reply_target.reply_audio(fh, title=title, write_timeout=120)
                 elif is_image:
-                    await reply_target.reply_photo(fh, caption=title)
+                    await reply_target.reply_photo(fh, caption=title, write_timeout=60)
                 else:
                     audio_markup = None
                     if url_key:
@@ -487,6 +487,7 @@ async def download_and_send(
                         caption=f"🎬 {title}",
                         supports_streaming=True,
                         reply_markup=audio_markup,
+                        write_timeout=120,
                     )
 
             await status.delete()
@@ -641,7 +642,15 @@ async def async_main():
 
     health_runner = await start_health_server(PORT)
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .read_timeout(30)
+        .write_timeout(120)
+        .connect_timeout(30)
+        .pool_timeout(10)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
