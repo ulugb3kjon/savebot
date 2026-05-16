@@ -132,10 +132,12 @@ def build_ydl_opts(tmpdir: str, quality: str, platform: str = "other") -> dict:
 
     if platform == "youtube":
         height = {"360": 360, "720": 720, "1080": 1080}.get(quality, 720)
+        # Pre-merged formatni birinchi urinib ko'ramiz (ffmpeg shart emas)
         base["format"] = (
-            f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]"
+            f"best[height<={height}][ext=mp4]"
+            f"/bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]"
             f"/bestvideo[height<={height}]+bestaudio"
-            f"/best[height<={height}][ext=mp4]/best[height<={height}]/best"
+            f"/best[height<={height}]/best"
         )
         base["merge_output_format"] = "mp4"
         return base

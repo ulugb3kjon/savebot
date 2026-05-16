@@ -13,7 +13,11 @@
       "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot commit -m \"Remove nixpacks.toml — use Dockerfile only\")",
       "Bash(curl -s -X POST https://backboard.railway.app/graphql/v2 -H 'Authorization: Bearer 3f1199de-b15c-4033-a69d-499326c7b78b' -H 'Content-Type: application/json' -d '{\"query\":\"{ buildLogs\\(deploymentId: \\\\\"2b78d517-dbef-43f3-bfea-2567a0c3ad13\\\\\", limit: 200\\) { message } }\"}')",
       "Bash(curl -s -X POST https://backboard.railway.app/graphql/v2 -H 'Authorization: Bearer 3f1199de-b15c-4033-a69d-499326c7b78b' -H 'Content-Type: application/json' -d '{\"query\":\"{ __type\\(name: \\\\\"Builder\\\\\"\\) { enumValues { name } } }\"}')",
-      "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot commit -m \"Fix: use python3 -m pip in nixpacks install, remove Dockerfile\")"
+      "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot commit -m \"Fix: use python3 -m pip in nixpacks install, remove Dockerfile\")",
+      "Bash(curl -s -X POST https://backboard.railway.app/graphql/v2 -H 'Authorization: Bearer 3f1199de-b15c-4033-a69d-499326c7b78b' -H 'Content-Type: application/json' -d '{\"query\":\"{ buildLogs\\(deploymentId: \\\\\"3d783111-cb96-46e5-b9e1-1aca75cca95d\\\\\", limit: 200\\) { message } }\"}')",
+      "Bash(curl -s -X POST https://backboard.railway.app/graphql/v2 -H 'Authorization: Bearer 3f1199de-b15c-4033-a69d-499326c7b78b' -H 'Content-Type: application/json' -d '{\"query\":\"{ buildLogs\\(deploymentId: \\\\\"0be8f36f-0539-44cf-a902-3096f605d089\\\\\", limit: 300\\) { message } }\"}')",
+      "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot commit -m \"Fix: use aptPkgs for ffmpeg, let Nixpacks auto-detect Python\")",
+      "Bash(git -C /Users/ulugbeknurmatov/Desktop/telegramsavebot commit -m \"Remove nixpacks.toml, prefer pre-merged formats \\(no system ffmpeg needed\\)\")"
     ]
   }
 }
