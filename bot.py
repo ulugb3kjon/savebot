@@ -50,13 +50,24 @@ MAX_FILE_SIZE = 50 * 1024 * 1024
 
 INSTAGRAM_HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
-    )
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    ),
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "X-IG-App-ID": "936619743392459",
 }
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
+
+def fmt_duration(seconds) -> str:
+    if not seconds:
+        return ""
+    m, s = divmod(int(seconds), 60)
+    return f"{m}:{s:02d}"
+
 
 def convert_to_wav(src: str, dst: str) -> bool:
     try:
@@ -105,6 +116,20 @@ def _sync_download(ydl_opts: dict, url: str):
         return ydl.extract_info(url, download=True)
 
 
+def _sync_search(query: str, limit: int = 5) -> list:
+    fetch = limit * 2
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,
+        "playlist_items": f"1:{fetch}",
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(f"ytsearch{fetch}:{query}", download=False)
+        entries = [e for e in (info.get("entries", []) if info else []) if e]
+        return entries[:limit]
+
+
 def _sync_resolve_pin_url(url: str) -> str:
     import httpx
 
@@ -117,7 +142,6 @@ def _sync_resolve_pin_url(url: str) -> str:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     }
-
     try:
         with httpx.Client(follow_redirects=True, timeout=30, headers=_headers) as client:
             resp = client.get(url)
@@ -129,13 +153,74 @@ def _sync_resolve_pin_url(url: str) -> str:
                 return final
     except Exception as e:
         logger.warning("httpx pin.it resolve xatosi: %s", e)
-
     return url
 
 
 async def resolve_pinterest_short_url(url: str) -> str:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _sync_resolve_pin_url, url)
+
+
+async def _cobalt_download(url: str, quality: str, tmpdir: str) -> str | None:
+    """cobalt.tools API orqali YouTube yuklab olish (IP blokirovkasini chetlab)."""
+    from aiohttp import ClientSession, ClientTimeout
+
+    is_audio = quality == "audio"
+    ext = ".mp3" if is_audio else ".mp4"
+    filepath = os.path.join(tmpdir, f"cobalt{ext}")
+
+    payload = {
+        "url": url,
+        "downloadMode": "audio" if is_audio else "auto",
+        "audioFormat": "mp3",
+        "audioBitrate": "192",
+        "videoQuality": "720",
+    }
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with ClientSession() as session:
+            async with session.post(
+                "https://api.cobalt.tools/",
+                json=payload,
+                headers=headers,
+                timeout=ClientTimeout(total=30),
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning("cobalt API %d qaytardi", resp.status)
+                    return None
+                data = await resp.json()
+
+            status_c = data.get("status")
+            dl_url = data.get("url")
+            if status_c not in ("redirect", "tunnel") or not dl_url:
+                logger.warning("cobalt: status=%s data=%s", status_c, str(data)[:150])
+                return None
+
+            async with session.get(dl_url, timeout=ClientTimeout(total=300)) as dl_resp:
+                if dl_resp.status != 200:
+                    return None
+                with open(filepath, "wb") as f:
+                    async for chunk in dl_resp.content.iter_chunked(65536):
+                        f.write(chunk)
+
+        if os.path.exists(filepath) and os.path.getsize(filepath) > 1000:
+            logger.info("cobalt OK: %d bayt", os.path.getsize(filepath))
+            return filepath
+        if os.path.exists(filepath):
+            os.unlink(filepath)
+        return None
+    except Exception as exc:
+        logger.warning("cobalt xatosi: %s", str(exc)[:120])
+        if os.path.exists(filepath):
+            try:
+                os.unlink(filepath)
+            except OSError:
+                pass
+        return None
 
 
 def build_ydl_opts(tmpdir: str, platform: str = "other") -> dict:
@@ -195,7 +280,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 📌 Pinterest — rasm / video\n\n"
         "🎵 *Shazam funksiyasi:*\n"
         "Ovozli xabar, audio yoki video yuboring → qo'shiq aniqlanib, "
-        "SoundCloud'dan MP3 yuklab beradi!\n\n"
+        "5 ta variant chiqadi, tanlang → MP3 yuklanadi!\n\n"
         "💡 *Foydalanish:* Shunchaki link yoki ovozli xabar yuboring."
     )
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -209,8 +294,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Instagram, TikTok, Twitter, Facebook, Pinterest ishlaydi\n\n"
         "*2. Musiqa aniqlash 🎵 (Shazam):*\n"
         "• Ovozli xabar yoki video yuboring\n"
-        "• Bot qo'shiqni topib, *⬇️ Yuklab olish* tugmasini chiqaradi\n"
-        "• Tugmaga bosing → SoundCloud'dan MP3 yuboriladi\n\n"
+        "• Bot qo'shiqni topib, 5 ta variant ko'rsatadi\n"
+        "• Raqamga bosing → MP3 yuklanadi (SoundCloud yoki YouTube)\n\n"
         "*3. Buyruqlar:*\n"
         "/start — boshlash\n"
         "/help — yordam\n\n"
@@ -271,46 +356,78 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ─── shazam audio downloader (SoundCloud) ────────────────────────────────────
+# ─── shazam audio downloader: SoundCloud → cobalt(YouTube) → yt-dlp ──────────
 
-async def download_shazam_audio(query: str, status_msg, reply_target):
+async def download_shazam_audio(query: str, yt_url: str, status_msg, reply_target):
     loop = asyncio.get_event_loop()
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        sc_opts = {
+    audio_pp = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]
+
+    def _sc_opts(tmpdir):
+        return {
             "format": "bestaudio/best",
             "outtmpl": os.path.join(tmpdir, "%(title).80s.%(ext)s"),
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
-            "postprocessors": [
-                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
-            ],
+            "postprocessors": audio_pp,
         }
 
+    with tempfile.TemporaryDirectory() as tmpdir:
         info = None
+        cobalt_path = None
+
+        # 1) SoundCloud
         try:
             info = await loop.run_in_executor(
-                None, lambda: _sync_download(sc_opts, f"scsearch1:{query}")
+                None, lambda: _sync_download(_sc_opts(tmpdir), f"scsearch1:{query}")
             )
             logger.info("SoundCloud: topildi — %s", query)
         except Exception as e:
             logger.warning("SoundCloud topilmadi: %s", str(e)[:120])
 
+        # 2) cobalt.tools (YouTube URL orqali, Railway IP blokirovkasiz)
         if not info:
+            cobalt_url = yt_url if (yt_url and yt_url.startswith("http")) else None
+            if cobalt_url:
+                cobalt_path = await _cobalt_download(cobalt_url, "audio", tmpdir)
+                if cobalt_path:
+                    logger.info("cobalt audio: topildi — %s", cobalt_url)
+
+        # 3) yt-dlp YouTube fallback
+        if not info and not cobalt_path:
+            yt_opts = _sc_opts(tmpdir)
+            yt_opts["format"] = "140/bestaudio/best"
+            yt_opts["extractor_args"] = {
+                "youtube": {"player_client": ["web", "android", "android_embedded", "ios", "tv"]}
+            }
+            dl_url = yt_url if (yt_url and yt_url.startswith("http")) else f"ytsearch1:{query}"
+            try:
+                info = await loop.run_in_executor(
+                    None, lambda: _sync_download(yt_opts, dl_url)
+                )
+                logger.info("YouTube yt-dlp: topildi — %s", dl_url)
+            except Exception as e:
+                logger.warning("YouTube yt-dlp ham xato: %s", str(e)[:120])
+
+        if not info and not cobalt_path:
             await status_msg.edit_text(
-                "❌ Bu qo'shiq SoundCloud'da topilmadi.\n"
-                "Boshqa qo'shiq yuboring."
+                "❌ Bu qo'shiq yuklab bo'lmadi.\n"
+                "Boshqa variant tanlang yoki boshqa qo'shiq yuboring."
             )
             return
 
-        title = (info.get("title") or "audio")[:100]
-        files = [f for f in Path(tmpdir).iterdir() if f.is_file()]
-        if not files:
-            await status_msg.edit_text("❌ Fayl topilmadi.")
-            return
+        if cobalt_path:
+            filepath = Path(cobalt_path)
+            title = query[:100]
+        else:
+            title = (info.get("title") or "audio")[:100]
+            files = [f for f in Path(tmpdir).iterdir() if f.is_file()]
+            if not files:
+                await status_msg.edit_text("❌ Fayl topilmadi.")
+                return
+            filepath = files[0]
 
-        filepath = files[0]
         if filepath.stat().st_size > MAX_FILE_SIZE:
             mb = filepath.stat().st_size // (1024 * 1024)
             await status_msg.edit_text(f"❌ Fayl {mb} MB — Telegram limiti 50 MB.")
@@ -346,16 +463,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if parts[0] == "shazam" and len(parts) == 3:
-        _, action, search_key = parts
-        if action == "dl":
-            store = SEARCH_STORE.get(search_key)
-            if not store:
-                await query.message.reply_text("❌ Ma'lumot eskirgan. Qaytadan yuboring.")
-                return
-            song_query = store.get("query", "")
-            status = await query.message.reply_text("⏬ Yuklanmoqda... iltimos kuting")
-            await download_shazam_audio(song_query, status, query.message)
+    if parts[0] == "yt" and len(parts) == 4:
+        _, action, search_key, idx_str = parts
+        index = int(idx_str)
+
+        store = SEARCH_STORE.get(search_key)
+        if not store:
+            await query.message.reply_text("❌ Ma'lumot eskirgan. Qaytadan yuboring.")
+            return
+
+        entries = store.get("entries", [])
+        song_query = store.get("query", "")
+
+        if index >= len(entries):
+            await query.message.reply_text("❌ Ma'lumot eskirgan. Qaytadan yuboring.")
+            return
+
+        entry = entries[index]
+        yt_url = entry.get("url", "")
+        if yt_url and not yt_url.startswith("http"):
+            yt_url = f"https://www.youtube.com/watch?v={yt_url}"
+
+        status = await query.message.reply_text("⏬ Yuklanmoqda... iltimos kuting")
+        await download_shazam_audio(song_query, yt_url, status, query.message)
         return
 
 
@@ -404,9 +534,7 @@ async def download_and_send(
 
             if size > MAX_FILE_SIZE:
                 mb = size // (1024 * 1024)
-                await status.edit_text(
-                    f"❌ Fayl hajmi {mb} MB — Telegram limiti 50 MB."
-                )
+                await status.edit_text(f"❌ Fayl hajmi {mb} MB — Telegram limiti 50 MB.")
                 return
 
             await status.edit_text("📤 Yuborilmoqda...")
@@ -433,6 +561,39 @@ async def download_and_send(
         except yt_dlp.utils.DownloadError as e:
             err = str(e).lower()
             logger.warning("yt-dlp [%s]: %s", platform, err[:200])
+
+            # Instagram retry: ba'zi reels extractor_args siz ishlaydi
+            if platform == "instagram" and ("403" in err or "404" in err or "unable" in err):
+                try:
+                    retry_opts = {
+                        "outtmpl": os.path.join(tmpdir, "retry.%(ext)s"),
+                        "quiet": True,
+                        "no_warnings": True,
+                        "noplaylist": True,
+                        "format": "best[ext=mp4]/best",
+                        "http_headers": INSTAGRAM_HEADERS,
+                    }
+                    info2 = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: _sync_download(retry_opts, url)
+                    )
+                    if info2:
+                        files2 = [f for f in Path(tmpdir).iterdir() if f.is_file()]
+                        if files2:
+                            fp2 = max(files2, key=lambda f: f.stat().st_size)
+                            if fp2.stat().st_size <= MAX_FILE_SIZE and fp2.stat().st_size > 1000:
+                                title2 = (info2.get("title") or "media")[:100]
+                                await status.edit_text("📤 Yuborilmoqda...")
+                                with open(fp2, "rb") as fh2:
+                                    ext2 = fp2.suffix.lower()
+                                    if ext2 in (".jpg", ".jpeg", ".png", ".webp"):
+                                        await reply_target.reply_photo(fh2, caption=title2, write_timeout=60)
+                                    else:
+                                        await reply_target.reply_video(fh2, caption=f"🎬 {title2}", supports_streaming=True, write_timeout=120)
+                                await status.delete()
+                                return
+                except Exception:
+                    pass
+
             if "private" in err or "login" in err:
                 await status.edit_text("❌ Bu xususiy post — yuklab bo'lmadi.")
             elif "not available" in err or "unavailable" in err:
@@ -441,12 +602,13 @@ async def download_and_send(
                 await status.edit_text("❌ Kontent topilmadi (404).")
             else:
                 await status.edit_text(f"❌ Yuklashda xatolik:\n`{str(e)[:200]}`", parse_mode="Markdown")
+
         except Exception as e:
             logger.exception("download_and_send [%s]", platform)
             await status.edit_text(f"❌ Kutilmagan xatolik: {str(e)[:200]}")
 
 
-# ─── Shazam ──────────────────────────────────────────────────────────────────
+# ─── Shazam + 5-variant search ───────────────────────────────────────────────
 
 async def shazam_and_reply(update: Update, file_id: str, status_msg):
     msg = update.message
@@ -480,17 +642,51 @@ async def shazam_and_reply(update: Update, file_id: str, status_msg):
             artist = track.get("subtitle", "Noma'lum ijrochi")
             query = f"{artist} {song_title}"
 
+            entries = await loop.run_in_executor(None, _sync_search, query, 5)
+
             images = track.get("images", {})
             coverart = images.get("coverarthq") or images.get("coverart")
 
-            search_key = uuid.uuid4().hex[:10]
-            SEARCH_STORE[search_key] = {"query": query}
+            if not entries:
+                caption = f"🎵 *{song_title}*\n👤 {artist}"
+                await status_msg.delete()
+                if coverart:
+                    await msg.reply_photo(coverart, caption=caption, parse_mode="Markdown")
+                else:
+                    await msg.reply_text(caption, parse_mode="Markdown")
+                return
 
-            caption = f"🎵 *{song_title}*\n👤 {artist}"
+            search_key = uuid.uuid4().hex[:10]
+            entries_list = []
+            for e in entries:
+                vid_id = e.get("id") or e.get("url", "")
+                full_url = e.get("webpage_url") or (
+                    f"https://www.youtube.com/watch?v={vid_id}" if vid_id else ""
+                )
+                entries_list.append({
+                    "url": full_url,
+                    "title": e.get("title", "Noma'lum"),
+                    "duration": e.get("duration"),
+                })
+            SEARCH_STORE[search_key] = {"entries": entries_list, "query": query}
+
+            lines = []
+            for i, e in enumerate(entries_list, 1):
+                dur = fmt_duration(e.get("duration"))
+                t = e["title"][:55]
+                lines.append(f"*{i}.* {t}  `{dur}`" if dur else f"*{i}.* {t}")
+
+            caption = (
+                f"🎵 *{song_title}*\n"
+                f"👤 {artist}\n\n"
+                + "\n".join(lines)
+            )
+
+            n = len(entries_list)
             keyboard = [[
-                InlineKeyboardButton("⬇️ Yuklab olish (MP3)", callback_data=f"shazam:dl:{search_key}")
+                InlineKeyboardButton(str(i + 1), callback_data=f"yt:audio:{search_key}:{i}")
+                for i in range(n)
             ]]
-            markup = InlineKeyboardMarkup(keyboard)
 
             await status_msg.delete()
 
@@ -498,11 +694,15 @@ async def shazam_and_reply(update: Update, file_id: str, status_msg):
                 await msg.reply_photo(
                     coverart,
                     caption=caption,
-                    reply_markup=markup,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="Markdown",
                 )
             else:
-                await msg.reply_text(caption, reply_markup=markup, parse_mode="Markdown")
+                await msg.reply_text(
+                    caption,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown",
+                )
 
         except Exception as e:
             logger.exception("Shazam xatosi")
