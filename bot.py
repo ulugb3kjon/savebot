@@ -529,8 +529,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def conflict_error_handler(update, context):
     if isinstance(context.error, Conflict):
-        logger.warning("Conflict xatosi: boshqa instance ishlayapti. 30s kutilmoqda...")
-        await asyncio.sleep(30)
+        logger.warning("Conflict: boshqa instance ishlayapti, bu instance to'xtatilmoqda.")
+        os._exit(0)
     else:
         logger.error("Xato: %s", context.error)
 
